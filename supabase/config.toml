@@ -1,0 +1,30 @@
+project_id = "companion-safety"
+
+[auth]
+additional_redirect_urls = [
+  "companion-safety://auth/callback",
+  "http://localhost:8081/**",
+  "http://localhost:8082/**",
+  "http://localhost:8000/**",
+]
+
+[functions.activate-emergency]
+verify_jwt = true
+
+[functions.report-route-deviation]
+verify_jwt = true
+
+[functions.register-evidence]
+verify_jwt = true
+
+[functions.get-evidence-download-url]
+verify_jwt = true
+
+[functions.delete-evidence]
+verify_jwt = true
+
+[functions.cleanup-expired-evidence]
+verify_jwt = true
+
+[functions.delete-account]
+verify_jwt = true

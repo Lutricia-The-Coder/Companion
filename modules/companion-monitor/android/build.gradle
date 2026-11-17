@@ -1,0 +1,30 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.companionmonitor'
+version = '1.0.0'
+
+expoModule {
+  canBePublished false
+}
+
+android {
+  namespace 'expo.modules.companionmonitor'
+  defaultConfig {
+    minSdkVersion 24
+    versionCode 1
+    versionName version.toString()
+    testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+  }
+}
+
+dependencies {
+  implementation 'com.google.ai.edge.litert:litert:1.4.0'
+  testImplementation 'junit:junit:4.13.2'
+  androidTestImplementation 'androidx.test:core:1.7.0'
+  androidTestImplementation 'androidx.test:runner:1.7.0'
+  androidTestImplementation 'androidx.test:rules:1.7.0'
+  androidTestImplementation 'androidx.test.ext:junit:1.3.0'
+}

@@ -1,0 +1,12 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:tools="http://schemas.android.com/tools">
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+  <application>
+    <!-- Lifecycle tests do not access the microphone; avoid Android 14+ while-in-use
+         microphone FGS restrictions in the instrumentation app. Production keeps mic. -->
+    <service
+      android:name="expo.modules.companionmonitor.CompanionMonitorService"
+      android:foregroundServiceType="mediaPlayback"
+      tools:replace="android:foregroundServiceType" />
+  </application>
+</manifest>

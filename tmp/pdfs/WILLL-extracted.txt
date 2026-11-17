@@ -1,0 +1,964 @@
+
+
+===== PAGE 1 =====
+You are the lead software architect, senior React Native developer, AI/ML engineer, 
+backend developer, security engineer, and QA engineer responsible for building a 
+complete, deployable student project called Smart Companion Safety App. 
+Your task is to BUILD THE ACTUAL APPLICATION, not merely describe it, produce a 
+mockup, or create a plan. 
+You have permission to inspect the workspace, create and modify project files, install 
+necessary dependencies, implement features, run tests, investigate errors, and fix 
+problems. Work systematically and keep the project runnable. 
+1. PROJECT PURPOSE 
+Build an AI-powered personal safety application that helps protect people, particularly 
+women and children, when travelling alone. 
+Traditional safety applications rely on users pressing an SOS button. This application must 
+additionally detect potential distress automatically and activate configured safety 
+protocols without requiring manual intervention. 
+The application must support: 
+• Personalized emergency trigger phrases entered during registration. 
+• Passive detection of screams, shouting, and distress-related vocal sounds. 
+• Voice-based distress detection using machine learning. 
+• Movement-based safety signals where appropriate. 
+• An agentic AI safety decision engine. 
+• Continuous live location tracking during active journeys. 
+• Route deviation detection. 
+• Automatic emergency communication. 
+• Live location sharing with authorized contacts. 
+• Audio and video evidence capture when permitted. 
+• A family and guardian monitoring dashboard. 
+• Optional wearable integration in a later phase. 
+Do not remove, weaken, or replace these requirements with a basic SOS-only application. 
+
+===== PAGE 2 =====
+2. REQUIRED TECHNOLOGY STACK 
+Use the following architecture. 
+Mobile application 
+• React Native. 
+• TypeScript. 
+• React Native Community CLI rather than an Expo-only implementation. 
+• React Navigation. 
+• A maintainable component-based architecture. 
+• Android as the first deployment target. 
+• Kotlin native modules or native Android services when React Native cannot provide 
+the necessary background functionality. 
+AI and audio processing 
+• Python and PyTorch for model training and evaluation. 
+• ONNX Runtime Mobile for supported on-device model inference. 
+• Evaluate sherpa-onnx or another suitable offline speech-recognition or keyword-
+spotting solution for personalized trigger phrases. 
+• Use Librosa for offline audio analysis and dataset preparation where appropriate. 
+• Use an appropriate audio-event classification model for screaming, shouting, and 
+other distress-related vocal sounds. 
+Do not assume that a generic speech-recognition model can reliably detect every scream. 
+Treat speech recognition and distress sound classification as separate capabilities. 
+Backend 
+• Superbase Authentication. 
+• Cloud Firestore. 
+• Supebase Cloud Functions or an equivalent secure backend. 
+• Superbase Cloud Messaging for supported push notifications. 
+• A suitable SMS provider. 
+
+===== PAGE 3 =====
+• A suitable transactional email provider. 
+Keep credentials and provider secrets on the backend. Never place private API secrets in 
+the mobile application. 
+Maps and location 
+• Android location services. 
+• Google Maps Platform, or another appropriate mapping provider. 
+• Route geometry, location timestamps, route deviation calculations, and live 
+location updates. 
+Family dashboard 
+• React. 
+• TypeScript. 
+• A responsive web interface. 
+• Secure authentication and role-based access control. 
+• A live map showing authorized users who have explicitly shared their journeys. 
+Development tools 
+• Node.js and npm. 
+• Gradle and the Android SDK for Android builds. 
+• Python virtual environments for AI development. 
+• Automated tests and static analysis. 
+Android Studio may be used for Android SDK management, native debugging, and 
+compilation, but build the application UI and application logic primarily with React Native. 
+3. NON-NEGOTIABLE FUNCTIONAL REQUIREMENTS 
+A. Registration and personalized trigger phrases 
+Implement registration and authentication. 
+During onboarding, allow users to: 
+• Enter their name and account details. 
+• Configure trusted emergency contacts. 
+
+===== PAGE 4 =====
+• Add, edit, and delete personalized trigger words and phrases. 
+• Choose whether a configured phrase can independently trigger an emergency. 
+• Enable or disable supported monitoring features. 
+• Configure emergency notification preferences. 
+• Grant and review location, microphone, notification, and camera permissions 
+where relevant. 
+• Configure journey tracking and sharing preferences. 
+Persist the user's trigger phrase configuration securely. 
+Do not merely display trigger phrases in the interface. Connect them to the actual phrase-
+detection pipeline. 
+Use an offline-capable speech recognition or keyword-spotting component. Investigate its 
+support for user-defined phrases, streaming audio, latency, memory, and licensing. 
+If arbitrary personalized phrases cannot be reliably supported by the selected model, 
+implement the best feasible architecture, document its limitations, and do not claim that 
+unsupported phrase recognition works. 
+B. Passive distress detection 
+Implement a real-time audio monitoring pipeline for Android. 
+The pipeline should include: 
+1. Audio capture through an appropriate Android audio API. 
+2. Audio preprocessing. 
+3. Windowing or chunking of the incoming audio. 
+4. On-device distress sound classification. 
+5. Personalized trigger phrase recognition. 
+6. Confidence scoring. 
+7. Event timestamps. 
+8. Integration with the safety decision engine. 
+9. Appropriate event logging and recovery from processing errors. 
+
+===== PAGE 5 =====
+Detect or classify relevant sounds such as: 
+• Screaming. 
+• Shouting. 
+• Distress-related vocalizations. 
+• Other supported audio events that may indicate danger. 
+Use an appropriate model, not hard-coded random detections. 
+Prefer on-device inference to reduce latency, protect privacy, and allow supported 
+monitoring to work without internet access. 
+Avoid saving continuous raw audio unless explicitly configured and legally permitted. Use a 
+privacy-preserving processing pipeline and securely manage any emergency recordings. 
+Account for false positives, false negatives, background noise, different voices, different 
+environments, and device performance. 
+C. Agentic AI safety decision engine 
+Implement a genuine, testable safety decision engine. 
+The engine must combine relevant available signals, including: 
+• Audio distress classification. 
+• Personalized trigger phrase detection. 
+• Motion or fall-related signals where supported. 
+• Journey status. 
+• Route deviations. 
+• User-configured safety rules. 
+• Confidence scores and recent events. 
+The engine must autonomously choose and initiate the appropriate safety protocol. 
+Create a defined state machine, for example: 
+IDLE 
+→ MONITORING 
+→ POSSIBLE_DISTRESS 
+→ EMERGENCY_ACTIVATED 
+
+===== PAGE 6 =====
+→ ALERTS_SENT 
+→ LIVE_EMERGENCY_TRACKING 
+→ RESOLVED 
+Adapt these states as necessary for a correct implementation. 
+A configured personal SOS phrase must be able to activate an emergency immediately if 
+the user has enabled independent triggering. Do not force the user to produce multiple 
+distress signals before help is requested. 
+For less certain audio detections, use configurable thresholds, temporal evidence, and 
+additional context to manage false alarms. 
+The engine must be able to: 
+• Activate emergency protocols without a manual SOS press. 
+• Start or escalate live location sharing. 
+• Notify configured contacts. 
+• Request permitted evidence capture. 
+• Retry failed communication attempts. 
+• Record decisions and their reasons. 
+• Handle duplicate detections without sending uncontrolled numbers of alerts. 
+• Recover safely from interruptions. 
+Implement deterministic decision logic as the reliable safety core. An ML model can 
+provide predictions, and an optional higher-level AI agent can evaluate context, but do not 
+depend on a remote generative AI API to make every emergency decision. 
+Do not let an unreliable cloud model or LLM be the only mechanism capable of activating 
+an emergency. 
+D. Continuous live location 
+Implement real location tracking, not a simulated moving marker. 
+When a journey is active: 
+• Obtain location through supported Android location APIs. 
+• Record latitude, longitude, accuracy, and timestamp. 
+
+===== PAGE 7 =====
+• Send authorized location updates to the backend. 
+• Update the family dashboard when new coordinates arrive. 
+• Display the last location update time. 
+• Handle poor GPS accuracy and temporary connectivity loss. 
+• Avoid presenting stale coordinates as current. 
+• Use efficient update intervals that balance responsiveness and battery 
+consumption. 
+When emergency tracking is activated, use an appropriate emergency tracking mode and 
+increase update frequency where device and operating-system constraints allow. 
+Support route deviation detection using the planned route and actual position. 
+Use an appropriate distance-to-route calculation and configurable thresholds. Avoid 
+triggering alerts solely because of ordinary GPS noise. 
+Provide: 
+• Start journey. 
+• End journey. 
+• Share journey. 
+• View live location. 
+• Detect route deviation. 
+• Notify contacts of configured route deviations. 
+• Continue emergency location updates while the service remains active and the 
+device permits them. 
+The backend must enforce journey ownership and access permissions. 
+A text message may include a secure link to the live tracking page. It must not be treated as 
+live tracking by itself. 
+E. Emergency communications 
+Implement actual emergency communication integrations. 
+When an emergency is activated: 
+
+===== PAGE 8 =====
+1. Create a unique emergency event. 
+2. Save the event and its initial location. 
+3. Notify the configured contacts using supported notification channels. 
+4. Send SMS and email through configured backend providers. 
+5. Include a timestamp and the latest available location. 
+6. Include a secure link to the live journey or emergency page. 
+7. Continue updating the emergency location. 
+8. Retry failed notifications with sensible limits. 
+9. Record delivery attempts and provider responses. 
+10. Prevent uncontrolled duplicate alerts. 
+Do not report an alert as delivered unless the provider returns an appropriate success 
+response. Distinguish queued, accepted, delivered, failed, and unknown states where 
+supported. 
+Create a provider abstraction so communication services can be configured without 
+rewriting the application. 
+If credentials are missing, implement the integration, provide a documented configuration 
+template, and report that external delivery cannot be verified until valid credentials are 
+configured. 
+Never use fake success responses. 
+F. Emergency audio and video evidence 
+Implement evidence capture using the permissions and APIs supported by Android. 
+When an emergency is activated: 
+• Start or request permitted audio evidence capture. 
+• Support video evidence capture where the platform, permissions, camera 
+availability, and application state allow it. 
+• Associate evidence with the emergency event. 
+• Use timestamps and secure storage. 
+• Upload evidence when connectivity permits. 
+
+===== PAGE 9 =====
+• Provide authorized access to the evidence. 
+• Apply retention and deletion rules. 
+• Protect recordings against unauthorized access. 
+Investigate Android restrictions on background camera use, microphone use, and 
+foreground services. 
+Do not claim that video recording will always work when the application is backgrounded or 
+the device is locked. If the operating system prevents a recording operation, record the 
+limitation and continue the remaining safety protocol. 
+Implement appropriate consent, privacy disclosures, and configurable evidence retention. 
+G. Family monitoring dashboard 
+Build a functional responsive web dashboard. 
+It must include: 
+• Secure sign-in. 
+• Authorized users and journeys. 
+• Live location map. 
+• Last location update and timestamp. 
+• Journey status. 
+• Route deviation alerts. 
+• Emergency event history. 
+• Emergency status. 
+• Authorized evidence access. 
+• Notification history where supported. 
+• Appropriate loading, empty, offline, and error states. 
+Implement real backend integration. 
+Do not populate the dashboard with hard-coded journeys and claim that they are live. 
+Use role-based access control and verify that a family member can only access journeys 
+and evidence that the user has explicitly authorized. 
+
+===== PAGE 10 =====
+Do not expose sensitive information through public database reads or guessable public 
+URLs. 
+H. Optional wearable integration 
+Keep the architecture ready for future smartwatch integration. 
+Do not make the first release dependent on a smartwatch. 
+Document possible future integration with compatible wearable platforms for supported 
+signals such as fall detection. 
+4. BACKGROUND MONITORING AND ANDROID REQUIREMENTS 
+Continuous safety monitoring is a core product requirement. 
+Investigate and implement the Android-specific mechanisms needed for: 
+• Background location updates. 
+• Appropriate foreground services and notifications. 
+• Microphone access while monitoring. 
+• Camera access when permitted. 
+• Runtime permission handling. 
+• Battery optimization considerations. 
+• Network reconnection. 
+• Process interruptions. 
+• Service recovery. 
+• Secure communication between Kotlin and React Native. 
+Use native Kotlin components where necessary. 
+Design monitoring so it can remain active when the screen is off and the user has enabled 
+the required features, provided Android allows the required services to continue. 
+Do not bypass Android privacy controls, permission prompts, or operating-system 
+restrictions. 
+Do not promise guaranteed operation after force-stop, device shutdown, permission 
+revocation, battery depletion, or other conditions that prevent the operating system from 
+running the service. 
+
+===== PAGE 11 =====
+Document the exact conditions under which monitoring is expected to operate. 
+5. SECURITY AND PRIVACY 
+Implement security from the beginning. 
+Requirements: 
+• Firebase Authentication or an equivalent supported authentication system. 
+• Secure session handling. 
+• Database security rules. 
+• Server-side authorization. 
+• Role-based access. 
+• Secure storage of sensitive device-side configuration. 
+• Protected evidence files. 
+• Expiring or otherwise appropriately protected evidence-access links. 
+• Input validation. 
+• Rate limiting for sensitive backend operations. 
+• Abuse prevention for SMS and email. 
+• Secure handling of provider credentials. 
+• Privacy-conscious logging. 
+• Data retention and deletion controls. 
+• Protection against unauthorized journey sharing. 
+• Protection against unauthorized emergency event creation or modification. 
+Do not hard-code credentials or commit secrets. 
+Include .env.example or equivalent configuration templates with placeholders only. 
+Do not place Firebase Admin credentials, SMS provider secrets, or email provider secrets 
+in the mobile application or browser dashboard. 
+6. REQUIRED PROJECT STRUCTURE 
+Organize the repository cleanly. Adapt the precise structure when justified. 
+
+===== PAGE 12 =====
+Suggested structure: 
+SmartCompanionSafety/ 
+apps/ 
+mobile/ 
+dashboard/ 
+backend/ 
+functions/ 
+ai/ 
+training/ 
+evaluation/ 
+models/ 
+docs/ 
+scripts/ 
+tests/ 
+.gitignore 
+README.md 
+.env.example 
+The mobile application should contain separate modules for: 
+• Authentication. 
+• Onboarding. 
+• Trigger phrase configuration. 
+• Monitoring controls. 
+• Audio capture. 
+• Distress inference. 
+• Trigger phrase recognition. 
+• Safety decision engine. 
+• Location tracking. 
+• Journey management. 
+• Route deviation detection. 
+• Emergency events. 
+• Notifications. 
+
+===== PAGE 13 =====
+• Evidence capture. 
+• Settings. 
+• Permissions. 
+• API and backend integration. 
+Keep UI components separate from business logic and native integrations. 
+7. IMPLEMENTATION RULES 
+Follow these rules throughout development. 
+1. Inspect the current workspace before changing files. 
+2. If a project already exists, preserve useful code and adapt it instead of 
+unnecessarily recreating it. 
+3. If the workspace is empty, scaffold the repository and applications. 
+4. Check dependency compatibility before installing packages. 
+5. Use maintained libraries with appropriate licenses. 
+6. Do not create fake implementations of required functionality. 
+7. Do not replace real location tracking with a random marker. 
+8. Do not replace audio inference with a hard-coded timer. 
+9. Do not claim SMS or email works without a real provider integration. 
+10. Do not claim a model works until it can actually be loaded and evaluated. 
+11. Provide a demo mode that is clearly separated from real safety operations. 
+12. Keep the project buildable after each major implementation stage. 
+13. Add tests for the safety engine and other critical logic. 
+14. Handle errors rather than swallowing them. 
+15. Document every required external configuration. 
+16. Do not leave core functionality as TODO comments while claiming completion. 
+17. If a dependency or operating-system restriction blocks a feature, investigate 
+alternatives and document the exact limitation. 
+18. Never fabricate test results, delivery confirmations, or successful device behavior. 
+
+===== PAGE 14 =====
+8. TESTING REQUIREMENTS 
+Create automated tests for: 
+• Personalized trigger phrase matching. 
+• Emergency decision rules. 
+• Independent SOS phrase activation. 
+• Distress confidence thresholds. 
+• Duplicate emergency suppression. 
+• Route deviation calculations. 
+• Stale location detection. 
+• Emergency event creation. 
+• Authorization checks. 
+• Notification retry logic. 
+• State transitions. 
+• Interrupted monitoring and recovery behavior where testable. 
+Add integration tests where practical. 
+Evaluate the audio model on suitable validation data. Report precision, recall, false-
+positive rate, false-negative rate, and latency where the data permits. 
+Do not claim the application is reliable for real emergencies based only on a successful 
+build or a few manual tests. 
+9. DEFINITION OF DONE 
+The project is not complete merely because the screens look attractive. 
+Completion requires: 
+• A working React Native application. 
+• A working onboarding and authentication flow. 
+• User-configurable trigger phrases connected to a real detection component. 
+• A working audio-processing and distress-classification pipeline. 
+• A functioning agentic safety decision engine. 
+
+===== PAGE 15 =====
+• Real Android location integration. 
+• Real route deviation logic. 
+• Backend integration. 
+• Configurable SMS, email, and push notifications. 
+• Appropriate emergency evidence-capture implementation. 
+• A functioning family dashboard. 
+• Security rules and authorization. 
+• Automated tests. 
+• Build and setup instructions. 
+• Honest documentation of features that need credentials, hardware testing, model 
+evaluation, or additional permissions. 
+10. HOW TO BEGIN 
+First inspect the repository and the available development environment. 
+Then: 
+1. Summarize the current state of the workspace. 
+2. Identify missing tools and dependencies. 
+3. Produce a concise implementation plan with milestones. 
+4. Create or adapt the project structure. 
+5. Implement the first milestone immediately. 
+6. Run the available checks and tests. 
+7. Fix any errors caused by your changes. 
+8. Report what works, what remains, and the exact next command. 
+Do not stop after producing the plan. Begin implementation. 
+Proceed incrementally until all feasible functionality has been implemented, tested, and 
+documented. 
+This is a safety-critical application. Prioritize correctness, privacy, resilience, and honest 
+reporting over superficial feature completeness. 
+
+===== PAGE 16 =====
+========================================================================= 
+Implement the Smart Companion Safety App mobile application using React Native 
+Community CLI and TypeScript. 
+Do not switch the mobile application to Flutter, native-only Android UI, or an Expo-only 
+architecture. 
+First inspect the existing repository and reuse the structure established by the master 
+prompt. 
+Implement the following screens 
+1. Welcome and onboarding. 
+2. Registration and sign-in. 
+3. User profile. 
+4. Emergency contact management. 
+5. Personalized trigger phrase management. 
+6. Monitoring permissions and setup. 
+7. Main safety dashboard. 
+8. Journey planning. 
+9. Active journey and live location. 
+10. Emergency status. 
+11. Emergency event history. 
+12. Evidence history. 
+13. Safety settings. 
+14. Privacy and permissions. 
+15. Help and troubleshooting. 
+Main dashboard 
+Display: 
+• Monitoring status. 
+• Audio distress detection status. 
+
+===== PAGE 17 =====
+• Personalized trigger phrase status. 
+• Location tracking status. 
+• Current journey status. 
+• Emergency contact readiness. 
+• Recent safety events. 
+• A clear manual SOS button as a backup. 
+The manual SOS button must supplement—not replace—automatic distress detection. 
+Clearly distinguish between: 
+• Monitoring active. 
+• Monitoring unavailable. 
+• Permission required. 
+• Emergency detected. 
+• Emergency activated. 
+• Notifications pending. 
+• Emergency resolved. 
+Trigger phrase configuration 
+Allow users to add, edit, remove, and test their personalized trigger phrases. 
+Save them to the user's authenticated configuration. 
+Connect phrase management to the real detection component. If the detection engine is 
+unavailable, show that state honestly. 
+Never display "phrase detection active" merely because a user has entered a phrase. 
+Architecture 
+Keep screens, components, services, and state management separate. 
+Create typed interfaces for: 
+• User profiles. 
+• Trusted contacts. 
+
+===== PAGE 18 =====
+• Trigger phrases. 
+• Journeys. 
+• Location updates. 
+• Distress detections. 
+• Emergency events. 
+• Notification attempts. 
+• Evidence records. 
+Use proper loading, empty, permission-denied, offline, and error states. 
+Avoid putting the entire application inside one component. 
+Native Android integration 
+Create a clear React Native-to-Kotlin integration boundary for: 
+• Audio monitoring. 
+• Background location. 
+• Distress model inference where appropriate. 
+• Emergency evidence capture. 
+• Foreground service status. 
+Investigate the correct implementation for the project's React Native version. Do not invent 
+native APIs. 
+Handle Android permissions and foreground-service requirements correctly. 
+Visual design 
+Create a polished, accessible, modern safety application. 
+Use a consistent design system, readable typography, clear safety-status indicators, 
+accessible touch targets, and layouts that work on different Android screen sizes. 
+Make the interface useful under stress. Avoid excessive animation, clutter, or ambiguous 
+emergency controls. 
+Validation 
+Run TypeScript checks, linting, and available tests. 
+
+===== PAGE 19 =====
+Build the Android application when the required environment is available. 
+Fix errors caused by the implementation. 
+At the end, report: 
+• Screens implemented. 
+• Actual integrations completed. 
+• Features that still need backend configuration. 
+• Native features that need physical-device testing. 
+• Exact commands for running the app. 
+Do not use mock data in place of real production integrations without explicitly labeling the 
+data as demo-only. 
+=========================================================================
+==== 
+Implement the real AI distress detection pipeline and autonomous safety decision engine 
+for the Smart Companion Safety App. 
+Inspect the current project before making changes. 
+Objective 
+The application must be capable of monitoring supported audio input, identifying potential 
+distress, recognizing configured personal trigger phrases, and activating safety protocols 
+automatically. 
+Do not require the user to press the SOS button. 
+1. Audio processing 
+Implement an Android audio pipeline using an appropriate native audio capture 
+mechanism. 
+Use bounded audio buffers and a streaming processing design suitable for real-time 
+operation. 
+Investigate: 
+• Sample rates supported by the device and model. 
+• Audio window size and overlap. 
+
+===== PAGE 20 =====
+• Inference latency. 
+• Memory use. 
+• Battery consumption. 
+• Microphone errors and interruptions. 
+• Model loading and recovery. 
+Do not retain continuous audio by default. 
+2. Distress sound classification 
+Identify a suitable pretrained or trainable audio-event classification model that can 
+distinguish supported distress-related sounds from ordinary environmental sounds. 
+Evaluate whether the model can identify: 
+• Screams. 
+• Shouting. 
+• Distress-related vocal sounds. 
+• Relevant non-speech audio events. 
+Use ONNX Runtime Mobile for suitable models. 
+If a model requires training or conversion: 
+• Create the training and conversion scripts. 
+• Document dataset requirements and licensing. 
+• Keep training data separate from production recordings. 
+• Create a reproducible evaluation procedure. 
+• Do not claim that training succeeded without running it. 
+Do not invent model files or pretend a placeholder model is functional. 
+If a real model cannot be obtained or evaluated in the current environment, implement the 
+integration interface and a clearly labeled unavailable state, then report exactly what is 
+missing. 
+3. Personalized trigger phrases 
+
+===== PAGE 21 =====
+Investigate an offline-capable streaming speech recognition or keyword-spotting engine, 
+including sherpa-onnx where appropriate. 
+The engine must process incoming audio and recognize phrases configured by the user. 
+Support phrase enrollment and configuration in the mobile application. 
+For each recognized phrase, provide: 
+• The configured phrase identifier. 
+• Detection timestamp. 
+• Confidence or matching information when supported. 
+• Whether the phrase is configured as an independent emergency trigger. 
+Do not assume all speech models support arbitrary user-defined phrases. 
+If exact arbitrary phrase recognition requires a different implementation, investigate and 
+document the trade-offs. 
+4. Safety decision engine 
+Implement a deterministic, testable engine that receives: 
+• Audio classification events. 
+• Trigger phrase events. 
+• Motion or fall events where supported. 
+• Journey status. 
+• Route deviation events. 
+• User-configured safety preferences. 
+The engine must produce explicit decisions with reasons. 
+Implement configurable rules, event deduplication, time windows, confidence thresholds, 
+and safe state transitions. 
+A configured independent SOS phrase must trigger the emergency protocol without waiting 
+for additional evidence. 
+High-confidence distress detections must be capable of activating an emergency 
+automatically according to the user's configured policy. 
+
+===== PAGE 22 =====
+Do not depend on a cloud LLM to decide whether the system should activate an 
+emergency. 
+The term "agentic AI" must refer to an implemented decision-and-action system, not a 
+chatbot that merely describes what it would do. 
+5. Emergency actions 
+When an emergency is activated, the engine must call real application services to: 
+• Create an emergency event. 
+• Start or escalate live location tracking. 
+• Notify the backend. 
+• Request emergency notifications to trusted contacts. 
+• Request permitted evidence capture. 
+• Log decisions and outcomes. 
+• Retry recoverable failures. 
+Use idempotent operations so one detection does not create unlimited emergency events 
+or duplicate notifications. 
+The application must continue to attempt available safety actions if one component fails. 
+For example, failure to start a video recording must not prevent location sharing or 
+notification attempts. 
+6. Testing 
+Create unit tests for: 
+• Trigger phrase events. 
+• Independent phrase activation. 
+• High-confidence distress detection. 
+• Low-confidence audio events. 
+• Multiple signals within a time window. 
+• Duplicate detections. 
+• Emergency escalation. 
+
+===== PAGE 23 =====
+• Failed notification services. 
+• Interrupted monitoring. 
+• State transitions. 
+Include representative test scenarios for ordinary conversation, loud background noise, 
+shouting, and scream detections. 
+Use suitable labeled evaluation data where available. Do not fabricate model accuracy. 
+7. Deliverables 
+Implement the code, tests, configuration, and documentation. 
+Explain: 
+• Which model was selected and why. 
+• Which events it can actually detect. 
+• How personalized phrase recognition works. 
+• How the safety agent makes decisions. 
+• What continues working offline. 
+• What requires internet access. 
+• How background monitoring is implemented on Android. 
+• What remains unverified on physical hardware. 
+Do not describe the system as fully operational until the real inference pipeline and 
+emergency action integration have been verified. 
+=========================================================================
+==== 
+Implement the real backend, continuous live location tracking, route deviation detection, 
+and emergency notification system. 
+Preserve the existing React Native architecture. 
+Backend 
+Use Superbase Authentication, Firestore, Cloud Functions, and Firebase Cloud Messaging 
+where appropriate. 
+
+===== PAGE 24 =====
+Create a secure data model for: 
+• Users. 
+• Trusted contacts. 
+• Journeys. 
+• Planned routes. 
+• Live location updates. 
+• Emergency events. 
+• Notification attempts. 
+• Evidence metadata. 
+• Authorized sharing relationships. 
+Define appropriate Firestore security rules and server-side authorization. 
+Users must not be able to read another person's private journeys or evidence without 
+authorization. 
+Live location 
+Implement real Android location acquisition. 
+For an active journey, store and transmit location updates with: 
+• Latitude. 
+• Longitude. 
+• Accuracy. 
+• Timestamp. 
+• Journey identifier. 
+• Relevant emergency status. 
+Display the user's latest location on the family dashboard and refresh it as updates arrive. 
+Clearly indicate when location is stale or unavailable. 
+Do not generate fake coordinates or move a map marker artificially. 
+Use an appropriate Android foreground service for supported background tracking. Follow 
+Android permission and foreground-service requirements. 
+
+===== PAGE 25 =====
+Implement configurable update intervals and sensible battery-management behavior. 
+During an emergency, attempt to maintain or increase location-update frequency where 
+supported. 
+Route deviation 
+Allow a user to start a journey with a destination or planned route. 
+Compare actual GPS positions against the route geometry. 
+Use a configurable distance threshold, GPS accuracy checks, and appropriate hysteresis 
+to prevent excessive alerts caused by GPS noise. 
+Create a route-deviation event when the configured criteria are met. 
+Notify authorized contacts when appropriate. 
+Emergency communication 
+Implement real integrations for: 
+• SMS. 
+• Email. 
+• Push notifications. 
+Keep provider credentials on the backend. 
+Create environment configuration templates and setup documentation. 
+An emergency message should contain: 
+• Emergency status. 
+• Timestamp. 
+• The latest available location. 
+• A secure link to the live tracking page. 
+• Relevant non-sensitive context. 
+Do not include raw audio or video in an ordinary SMS. 
+Use secure evidence access and appropriate authorization. 
+Reliability 
+Implement: 
+
+===== PAGE 26 =====
+• Notification delivery-attempt records. 
+• Retry logic with backoff. 
+• Duplicate suppression. 
+• Network reconnection. 
+• Offline queuing where appropriate. 
+• Location update timestamps. 
+• Clear delivery states. 
+• Server-side validation. 
+• Rate limiting for sensitive operations. 
+Do not claim delivery merely because a notification was queued. 
+If provider credentials are missing, make the integration configurable and clearly report 
+what cannot yet be tested. 
+Family dashboard 
+Implement a real-time map and journey status interface. 
+Only display journeys that the authenticated viewer is authorized to access. 
+Display: 
+• Current or last known location. 
+• Last update timestamp. 
+• Journey status. 
+• Route deviation events. 
+• Emergency status. 
+• Relevant notification history. 
+Test access control and location update flows. 
+Finish by documenting the required Firebase configuration, mapping credentials, 
+notification providers, and deployment steps. 
+=========================================================================
+========== 
+
+===== PAGE 27 =====
+Implement the Android-native capabilities required for background safety monitoring, 
+emergency evidence capture, and reliable service operation. 
+Use React Native for the application UI and Kotlin only where native Android integration is 
+necessary. 
+Background monitoring 
+Implement and document the Android services needed for supported: 
+• Audio monitoring. 
+• Live location tracking. 
+• Emergency state handling. 
+• Network reconnection. 
+• Service interruption recovery. 
+Use appropriate foreground service types and notifications. 
+Respect Android runtime permissions, background execution restrictions, and privacy 
+controls. 
+Do not bypass user consent or operating-system security. 
+Evidence capture 
+When the safety decision engine activates an emergency, request or initiate the supported 
+evidence-capture process. 
+Implement audio capture and investigate video capture under the applicable Android 
+restrictions. 
+Evidence must be associated with a specific emergency event. 
+Implement: 
+• Recording status. 
+• Capture timestamps. 
+• Permission error handling. 
+• Storage limits. 
+• Secure upload. 
+
+===== PAGE 28 =====
+• Upload retries. 
+• Access authorization. 
+• Retention and deletion. 
+• Recording failure reporting. 
+Do not report a recording as successful until the file exists and can be verified. 
+Do not assume that a background application can always start a camera. If Android 
+prevents the operation, report the failure and continue other emergency actions. 
+Reliability 
+Test or simulate, where possible: 
+• Screen off. 
+• Application backgrounded. 
+• Temporary network loss. 
+• GPS unavailable. 
+• Microphone unavailable. 
+• Camera unavailable. 
+• Permission revoked. 
+• Process interruption. 
+• Device reboot. 
+• Low battery. 
+Distinguish between conditions tested in an emulator and conditions verified on physical 
+hardware. 
+Do not promise that monitoring survives force-stop or other conditions in which Android 
+prevents the application from running. 
+Privacy and security 
+Minimize raw recording storage. 
+Secure local files and uploaded evidence. 
+Restrict evidence access to authorized users. 
+
+===== PAGE 29 =====
+Document relevant privacy disclosures, consent requirements, and legal considerations. 
+At completion, provide a device-testing checklist and identify any Android restrictions that 
+prevent a requirement from being guaranteed. 
+ 
+ 
+=========================================================================
+====== 
+Now perform a full integration and quality-assurance pass on the Smart Companion Safety 
+App. 
+Inspect the complete repository and identify missing, incomplete, disconnected, or 
+incorrectly implemented functionality. 
+Do not simply produce a report. Fix the problems you can resolve in the current 
+environment. 
+1. Verify the mobile application 
+Run the appropriate: 
+• TypeScript checks. 
+• Linting. 
+• Unit tests. 
+• React Native tests. 
+• Android build. 
+• Native compilation checks. 
+Fix errors caused by the implementation. 
+2. Verify automatic safety activation 
+Test scenarios where: 
+• A configured independent SOS phrase is recognized. 
+• A high-confidence scream event activates the configured safety protocol. 
+• A low-confidence event follows the configured uncertainty policy. 
+
+===== PAGE 30 =====
+• Multiple detections occur rapidly. 
+• The same event is delivered more than once. 
+• A notification provider fails. 
+• Location becomes unavailable. 
+• Evidence capture fails. 
+• Connectivity returns after an outage. 
+Verify that the safety engine attempts the available emergency actions and does not 
+become stuck in an invalid state. 
+3. Verify location tracking 
+Test: 
+• Starting and ending journeys. 
+• Updating actual GPS coordinates. 
+• Displaying updated positions on the dashboard. 
+• Detecting stale locations. 
+• Route deviation calculations. 
+• Temporary network loss. 
+• Resuming updates after connectivity returns. 
+• Authorization for shared journeys. 
+4. Verify backend security 
+Test: 
+• Unauthorized journey reads. 
+• Unauthorized evidence access. 
+• Access to another user's emergency events. 
+• Invalid or malicious inputs. 
+• Duplicate emergency submissions. 
+• Notification abuse and rate limits. 
+
+===== PAGE 31 =====
+Correct any security-rule problems found. 
+5. Verify notifications 
+Use test credentials or a provider sandbox when available. 
+Distinguish between: 
+• Unit-tested notification logic. 
+• Backend integration-tested notification requests. 
+• Provider-accepted messages. 
+• Confirmed message delivery. 
+Never claim a real SMS or email was delivered unless the provider supports and returns 
+that confirmation. 
+6. Verify AI model claims 
+Confirm that the selected model files exist, can be loaded, and run through the 
+implemented inference pipeline. 
+Report measured latency and evaluation metrics only when they have actually been 
+measured. 
+Identify missing datasets, models, permissions, credentials, and physical-device tests. 
+7. Final report 
+Provide a concise table with: 
+• Feature. 
+• Implementation status. 
+• Test performed. 
+• Test result. 
+• Remaining limitation. 
+Classify each feature as: 
+• Implemented and tested. 
+• Implemented but awaiting external configuration. 
+• Implemented but awaiting physical-device validation. 
+
+===== PAGE 32 =====
+• Partially implemented. 
+• Not implemented. 
+Then provide the exact commands needed to install dependencies, configure the project, 
+start the dashboard, and run the Android application. 
+Do not label the project production-ready merely because the build succeeds. 
+=========================================================================
+=======================================================================          
+How Your Compulsory Features Will Be Implemented 
+A. Personalized trigger words 
+During registration, the user enters their own emergency phrases. 
+For example: 
+• "Help me now." 
+• "Call my family." 
+• A personalized secret phrase. 
+The app stores the configuration and connects it to an offline-capable speech-recognition 
+or keyword-spotting engine. 
+When a configured emergency phrase is recognized, the app can activate the emergency 
+protocol automatically. 
+B. Automatic scream and distress detection 
+The app processes microphone input through an audio classification model running on the 
+phone. 
+It evaluates sounds such as screaming, shouting, and other supported distress-related 
+vocalizations. 
+The detection engine passes its results to the safety agent, which decides whether to 
+activate the configured emergency response. 
+The sound detector and speech recognizer are separate components: recognizing a 
+spoken phrase is different from classifying a scream. 
+C. Always-on monitoring 
+
+===== PAGE 33 =====
+Kotlin services will handle the Android functionality that React Native alone cannot reliably 
+guarantee, including background microphone and location operations. 
+The app will use the appropriate permissions, foreground services, and notifications. 
+Monitoring can continue while the screen is off when Android allows the service to operate. 
+Force-stops, permission revocation, battery depletion, and operating-system restrictions 
+can interrupt it. 
+D. Live location tracking 
+The app will use Android location services to obtain real coordinates. 
+During an active journey, the backend receives location updates and the family dashboard 
+displays the changing position. 
+During an emergency, the app attempts to maintain more frequent updates and shares a 
+link to the live tracking page with authorized contacts. 
+A location link must show the latest available position and refresh as new locations arrive; 
+it must not simply display a fixed coordinate. 
+E. Automatic emergency alerts 
+Firebase Cloud Functions will coordinate emergency processing and securely call the 
+configured SMS and email providers. 
+Firebase Cloud Messaging will handle supported push notifications. 
+The system will record notification attempts, handle failures, and retry where appropriate. 
+Actual SMS and email delivery requires configured provider accounts and valid credentials. 
+F. Evidence recording 
+Kotlin will handle the relevant Android recording integrations. 
+When an emergency occurs, the app will attempt to capture permitted audio or video and 
+associate it with the emergency event. 
+Android may restrict background camera access, so the app must report recording failures  
+ 

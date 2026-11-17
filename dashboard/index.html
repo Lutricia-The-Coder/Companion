@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#101c2e" />
+  <title>Companion · Safety dashboard</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar"><a class="brand" href="./">COMPANION <span>●</span></a><div class="account-tools"><div id="account" class="account">Not signed in</div><button id="sign-out" class="button secondary sign-out" type="button" hidden>Sign out</button></div></header>
+    <section class="intro"><div class="eyebrow">TRUSTED CONTACT DASHBOARD</div><h1>Stay close to<br />their journey.</h1><p>Sign in with the account the journey owner authorized. Location only appears for journeys shared with you.</p></section>
+    <section class="auth-card" id="auth-card">
+      <div class="card-title">SIGN IN OR CREATE A CONTACT ACCOUNT</div>
+      <label>Email<input id="email" type="email" autocomplete="email" placeholder="you@example.com" /></label>
+      <label>Password<input id="password" type="password" autocomplete="current-password" placeholder="At least 8 characters" /></label>
+      <div class="actions"><button id="sign-in" class="button primary">Sign in</button><button id="sign-up" class="button secondary">Create account</button></div>
+      <div id="message" class="message" role="status"></div>
+    </section>
+    <section class="journey-card" id="journey-card" hidden>
+      <div class="journey-heading"><div><div class="card-title">LIVE JOURNEY</div><h2 id="journey-title">Waiting for a journey</h2></div><div id="status" class="status">—</div></div>
+      <div id="map" aria-label="Live journey map"></div>
+      <div class="journey-meta"><div><span class="meta-label">LAST UPDATE</span><strong id="updated">Waiting for location</strong></div><div><span class="meta-label">COORDINATES</span><strong id="coordinates">—</strong></div></div>
+      <div id="emergency" class="emergency" hidden>Emergency status triggered</div>
+      <section class="event-history" aria-live="polite"><div class="card-title">SAFETY EVENTS</div><ol id="event-list"><li class="event-empty">No safety events recorded.</li></ol></section>
+    </section>
+    <section class="lookup-card" id="lookup-card" hidden>
+      <label>Journey ID<input id="journey-id" type="text" placeholder="Paste the journey ID shared by the owner" /></label>
+      <button id="open-journey" class="button primary">Open shared journey</button>
+    </section>
+    <footer>Location may be delayed by network or device settings. This dashboard does not contact emergency services.</footer>
+  </main>
+  <script src="./config.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

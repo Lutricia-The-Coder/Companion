@@ -1,0 +1,23 @@
+// The React Native app's codegen targets have long source paths on Windows.
+// Set the Android CMake staging directory before React Native finalizes the DSL.
+gradle.beforeProject { project ->
+  if (project.path == ':app') {
+    project.pluginManager.withPlugin('com.android.application') {
+      project.extensions.getByName('androidComponents').finalizeDsl { android ->
+        android.externalNativeBuild.cmake.buildStagingDirectory = new File('C:/c/app')
+        android.defaultConfig.externalNativeBuild.cmake.arguments.add('-DCMAKE_OBJECT_PATH_MAX=240')
+      }
+    }
+  }
+
+  // C++ source paths for these generated native library projects are also
+  // too long for Ninja to create reliably from the workspace on Windows.
+  if (project.path in [':react-native-worklets', ':react-native-nitro-modules', ':react-native-screens']) {
+    project.pluginManager.withPlugin('com.android.library') {
+      project.extensions.getByName('androidComponents').finalizeDsl { android ->
+        android.externalNativeBuild.cmake.buildStagingDirectory = new File("C:/c/${project.name}")
+        android.defaultConfig.externalNativeBuild.cmake.arguments.add('-DCMAKE_OBJECT_PATH_MAX=240')
+      }
+    }
+  }
+}
