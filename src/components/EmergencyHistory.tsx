@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAudioPlayer } from 'expo-audio';
 import { ActivityIndicator, Alert, Linking, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { supabase, supabaseReady } from '../lib/supabase';
-import { deleteEmergencyEvidence, requestEvidenceDownload } from '../services/evidence';
+import { deleteEmergencyEvidence, deleteLocalEmergencyEvidence, loadEvidenceOutbox, requestEvidenceDownload, uploadPendingEmergencyEvidence, type EvidenceOutboxRecord } from '../services/evidence';
 
 type EmergencyHistoryItem = {
   eventId: string;
@@ -22,26 +21,20 @@ type EmergencyHistoryItem = {
 type EvidenceRecord = { evidenceId: string; type: 'audio' | 'video'; expiresAt?: number; durationSeconds?: number };
 type StoredEvidence = { id: string; media_type: 'audio' | 'video'; expires_at?: number; duration_seconds?: number };
 
-type LocalEvidence = { eventId: string; uri: string; recordedAt: number; durationSeconds: number };
-
-const C = { bg: '#101C2E', panel: '#17263B', ink: '#F4F7FB', muted: '#9BAABD', teal: '#5CE0C0', line: '#2D4058', red: '#FF6B6B' };
+const C = { bg: '#F7F7F6', panel: '#F0F0EF', ink: '#151515', muted: '#707070', teal: '#D52B37', line: '#E3E3E2', red: '#D52B37' };
 
 export default function EmergencyHistory() {
   const [items, setItems] = useState<EmergencyHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [reload, setReload] = useState(0);
-  const [evidence, setEvidence] = useState<LocalEvidence[]>([]);
+  const [evidence, setEvidence] = useState<EvidenceOutboxRecord[]>([]);
+  const [retryingUploads, setRetryingUploads] = useState(false);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      void AsyncStorage.getItem('companion-emergency-audio-evidence-v1').then((raw) => {
-        if (!raw) return;
-        const parsed: unknown = JSON.parse(raw);
-        if (Array.isArray(parsed)) setEvidence(parsed as LocalEvidence[]);
-      }).catch(() => undefined);
-    }, 0);
-    return () => clearTimeout(timer);
+    let mounted = true;
+    void loadEvidenceOutbox().then((records) => { if (mounted) setEvidence(records); }).catch(() => undefined);
+    return () => { mounted = false; };
   }, []);
 
   const load = useCallback(async () => {
@@ -108,18 +101,28 @@ export default function EmergencyHistory() {
             {item.evidence?.map((record) => <RemoteEvidence key={record.evidenceId} journeyId={item.journeyId} eventId={item.eventId} evidence={record} onDeleted={() => setReload((value) => value + 1)} />)}
           </View>)}</ScrollView>}
     {evidence.length > 0 ? <View style={s.evidenceSection}>
-      <Text style={s.evidenceHeading}>Audio evidence stored on this device</Text>
-      {evidence.map((item) => <LocalAudioEvidence key={item.eventId} item={item} />)}
-      <Text style={s.meta}>Audio clips are local to this app and are not uploaded or shared.</Text>
+      <Text style={s.evidenceHeading}>Evidence on this device</Text>
+      <Text style={s.meta}>Local files expire after 30 days. Uploaded files stay in private storage and are visible only to authorized journey viewers until their server expiry.</Text>
+      {evidence.some((item) => item.uploadStatus !== 'uploaded') ? <TouchableOpacity style={s.refresh} disabled={retryingUploads} onPress={() => {
+        setRetryingUploads(true);
+        void uploadPendingEmergencyEvidence({ retryFailed: true }).then(async () => setEvidence(await loadEvidenceOutbox())).catch((cause) => Alert.alert('Upload retry failed', cause instanceof Error ? cause.message : 'Try again when connected.')).finally(() => setRetryingUploads(false));
+      }}><Text style={s.refreshText}>{retryingUploads ? 'Retrying…' : 'Retry evidence uploads'}</Text></TouchableOpacity> : null}
+      {evidence.map((item) => <LocalEvidenceCard key={item.evidenceId} item={item} onDeleted={async () => setEvidence(await loadEvidenceOutbox())} />)}
     </View> : null}
   </View>;
 }
 
-function LocalAudioEvidence({ item }: { item: LocalEvidence }) {
-  const player = useAudioPlayer(item.uri);
+function LocalEvidenceCard({ item, onDeleted }: { item: EvidenceOutboxRecord; onDeleted: () => void }) {
+  const player = useAudioPlayer(item.type === 'audio' ? item.uri : null);
+  const status = item.uploadStatus === 'uploaded' ? 'Uploaded privately' : item.uploadStatus === 'failed' ? 'Upload failed · manual retry available' : item.journeyId ? `Upload queued · ${item.uploadAttempts} attempts` : 'Saved locally · no signed-in journey';
   return <View style={s.card}>
-    <Text style={s.reason}>{new Date(item.recordedAt).toLocaleString()} · {item.durationSeconds}s</Text>
-    <TouchableOpacity style={s.refresh} onPress={() => player.play()} accessibilityRole="button"><Text style={s.refreshText}>Play local recording</Text></TouchableOpacity>
+    <Text style={s.reason}>{item.type === 'video' ? 'Video' : 'Audio'} · {new Date(item.recordedAt).toLocaleString()} · {item.durationSeconds}s</Text>
+    <Text style={s.meta}>{status}</Text>
+    {item.type === 'audio' ? <TouchableOpacity style={s.refresh} onPress={() => player.play()} accessibilityRole="button"><Text style={s.refreshText}>Play local recording</Text></TouchableOpacity> : null}
+    <TouchableOpacity style={s.refresh} onPress={() => Alert.alert('Delete local evidence?', 'This permanently removes the device copy. Any uploaded private copy must be deleted separately from the event record.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete local copy', style: 'destructive', onPress: () => { void deleteLocalEmergencyEvidence(item.evidenceId).then(onDeleted).catch((error) => Alert.alert('Delete failed', error instanceof Error ? error.message : 'Could not delete the local file.')); } },
+    ])}><Text style={s.deleteText}>Delete local copy</Text></TouchableOpacity>
   </View>;
 }
 

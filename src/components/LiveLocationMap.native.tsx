@@ -18,9 +18,9 @@ export default function LiveLocationMap({ point, trail, active, route = [] }: { 
   }
   return <View style={styles.container}>
     <MapView style={StyleSheet.absoluteFill} region={{ latitude: point.latitude, longitude: point.longitude, latitudeDelta: 0.006, longitudeDelta: 0.006 }} showsUserLocation showsMyLocationButton showsCompass loadingEnabled>
-      {trail.length > 1 && <Polyline coordinates={trail} strokeColor="#31C9AE" strokeWidth={4} />}
-      {route.length > 1 && <Polyline coordinates={point ? [{ latitude: point.latitude, longitude: point.longitude }, ...route] : route} strokeColor="#FFC96B" strokeWidth={3} lineDashPattern={[8, 5]} />}
-      {route.length > 0 && <Marker coordinate={route[route.length - 1]} title="Planned route endpoint" pinColor="#FFC96B" />}
+      {trail.length > 1 && <Polyline coordinates={trail} strokeColor="#D52B37" strokeWidth={4} />}
+      {route.length > 1 && <Polyline coordinates={point ? [{ latitude: point.latitude, longitude: point.longitude }, ...route] : route} strokeColor="#151515" strokeWidth={3} lineDashPattern={[8, 5]} />}
+      {route.length > 0 && <Marker coordinate={route[route.length - 1]} title="Planned route endpoint" pinColor="#D52B37" />}
       <Marker coordinate={point} title={active ? 'Live journey location' : 'Last known location'} description={point.timestamp ? new Date(point.timestamp).toLocaleTimeString() : undefined} />
     </MapView>
     <View style={styles.badge}><View style={[styles.dot, active && styles.dotLive]} /><Text style={styles.badgeText}>{active ? 'LIVE GPS' : 'LAST FIX'}</Text></View>
@@ -28,16 +28,16 @@ export default function LiveLocationMap({ point, trail, active, route = [] }: { 
 }
 
 const styles = StyleSheet.create({
-  container: { height: 234, borderRadius: 18, overflow: 'hidden', backgroundColor: '#172A3D' },
-  empty: { height: 234, borderRadius: 18, backgroundColor: '#172A3D', borderWidth: 1, borderColor: '#29435A', alignItems: 'center', justifyContent: 'center', padding: 24 },
-  emptyTitle: { color: '#F4F7FB', fontSize: 14, fontWeight: '700' },
-  emptyText: { color: '#9BAABD', fontSize: 12, lineHeight: 18, marginTop: 8, textAlign: 'center' },
-  badge: { position: 'absolute', top: 12, left: 12, borderRadius: 20, backgroundColor: '#101C2E', paddingHorizontal: 10, paddingVertical: 7, flexDirection: 'row', alignItems: 'center' },
+  container: { height: 234, borderRadius: 18, overflow: 'hidden', backgroundColor: '#E9E9E7' },
+  empty: { height: 234, borderRadius: 18, backgroundColor: '#E9E9E7', borderWidth: 1, borderColor: '#E3E3E2', alignItems: 'center', justifyContent: 'center', padding: 24 },
+  emptyTitle: { color: '#151515', fontSize: 14, fontWeight: '700' },
+  emptyText: { color: '#707070', fontSize: 12, lineHeight: 18, marginTop: 8, textAlign: 'center' },
+  badge: { position: 'absolute', top: 12, left: 12, borderRadius: 20, backgroundColor: '#FFFFFF', paddingHorizontal: 10, paddingVertical: 7, flexDirection: 'row', alignItems: 'center' },
   dot: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#9BAABD', marginRight: 7 },
-  dotLive: { backgroundColor: '#5CE0C0' },
-  badgeText: { color: '#F4F7FB', fontSize: 9, fontWeight: '800', letterSpacing: 1 },
+  dotLive: { backgroundColor: '#D52B37' },
+  badgeText: { color: '#151515', fontSize: 9, fontWeight: '800', letterSpacing: 1 },
   androidFallback: { justifyContent: 'center', gap: 7 },
-  coordinates: { color: '#B8C9D6', fontSize: 13, fontWeight: '600', textAlign: 'center' },
-  mapButton: { backgroundColor: '#31C9AE', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 9, marginTop: 2 },
-  mapButtonText: { color: '#0B2C32', fontSize: 12, fontWeight: '800' },
+  coordinates: { color: '#373737', fontSize: 13, fontWeight: '600', textAlign: 'center' },
+  mapButton: { backgroundColor: '#D52B37', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 9, marginTop: 2 },
+  mapButtonText: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
 });

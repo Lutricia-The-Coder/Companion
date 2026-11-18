@@ -20,4 +20,4 @@ export default function JourneyScreen() {
   return <CompanionApp screen="journey" />;
 }
 
-const s = StyleSheet.create({ loading: { flex: 1, backgroundColor: '#101C2E', justifyContent: 'center', alignItems: 'center' }, text: { color: '#9BAABD', marginTop: 12, fontSize: 12 } });
+const s = StyleSheet.create({ loading: { flex: 1, backgroundColor: '#F7F7F6', justifyContent: 'center', alignItems: 'center' }, text: { color: '#707070', marginTop: 12, fontSize: 12 } });

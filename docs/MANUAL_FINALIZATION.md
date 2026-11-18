@@ -1,35 +1,55 @@
-# Manual finalization and test steps
+# Remaining setup and test steps
 
-The repository work is ready for the remaining account- and device-specific steps. Do not use a real emergency contact for tests. Resend acceptance is not proof that an email reached an inbox.
+The local implementation and final arm64 APK are ready. Complete the Dashboard steps below before connecting the Honor X5c. Do not use real emergency contacts or invoke evidence cleanup against production data during testing.
 
-## 1. Deploy the updated Supabase functions
+## 1. Deploy the three updated Supabase functions
 
-Windows Application Control blocks the Supabase CLI in this environment, so deploy these three generated files in the Supabase Dashboard:
+The generated bundles are already prepared in `tmp/supabase-dashboard-functions/`. To regenerate them after future edits, open PowerShell in the project folder and run `node scripts/prepare-supabase-dashboard-functions.mjs`.
 
-1. Run `node scripts/prepare-supabase-dashboard-functions.mjs` from the project folder.
-2. In Supabase Dashboard, open **Edge Functions** and select `activate-emergency`.
-3. Back up the current code somewhere private, replace the editor contents with the complete contents of `tmp/supabase-dashboard-functions/activate-emergency.ts`, keep JWT verification enabled, and deploy.
-4. Repeat for `report-route-deviation.ts` and `register-evidence.ts` in their matching function editors.
-5. Confirm all three show deployed. Do not paste any keys into the source editor; the existing function secrets belong in the Dashboard's Secrets settings.
+For each function below, open Supabase Dashboard → your `Companion` project → **Edge Functions** → select the existing function → **Code**:
 
-## 2. Email delivery limitation
+| Function | Complete source to paste |
+|---|---|
+| `activate-emergency` | `tmp/supabase-dashboard-functions/activate-emergency.ts` |
+| `report-route-deviation` | `tmp/supabase-dashboard-functions/report-route-deviation.ts` |
+| `register-evidence` | `tmp/supabase-dashboard-functions/register-evidence.ts` |
 
-The Supabase Auth confirmation email verifies the Auth SMTP path only. Emergency, route, and evidence emails are sent by the Resend Edge Function integration. With `onboarding@resend.dev`, Resend only permits delivery to the account owner's email. To test delivery to a separate trusted contact, add and verify a domain in Resend, set `RESEND_FROM_EMAIL` to an allowed sender from that domain in Edge Function Secrets, and then use a disposable test contact. A domain is not required to test sign-up confirmation.
+For each one, save a private backup of its current code, replace the editor with the entire matching file, leave **Verify JWT** enabled, and click **Deploy updates**. Do not add any API keys to the function source. Existing secrets stay in Edge Function Secrets. Confirm the function shows the latest deployment time before moving to the next one.
 
-## 3. Remote family dashboard
+## 2. Email without buying a domain
 
-The dashboard currently runs locally at `http://localhost:8000`; another person's phone cannot reach that address. Publish the static `dashboard/` files, including the generated `dashboard/config.js`, on a public HTTPS static host. Then:
+The current Resend test sender `onboarding@resend.dev` can only send to the email address that owns the Resend account. You can test the email flow without paying for a domain by adding that same account-owner address as the test journey's trusted contact. The provider dashboard will show whether Resend accepted the message; check the owner's inbox for receipt.
 
-1. Add the host origin to Supabase Auth's allowed redirect URLs.
-2. Set the Edge Function secret `COMPANION_DASHBOARD_URL` to the HTTPS origin (no path/query string).
-3. Set `EXPO_PUBLIC_COMPANION_DASHBOARD_URL` in the mobile build environment to that same origin and rebuild the app.
-4. Create two disposable accounts, grant the second account journey access from the owner account, then sign in as the second account and verify the map updates live.
+To send to any other trusted contact, Resend requires a verified sending domain. Skip that until you own or control a domain. Supabase Auth confirmation SMTP is separate and does not prove emergency email delivery works.
 
-The dashboard's Supabase publishable key is intended for browser clients; never include a service-role or Resend secret in its config.
+## 3. Publish the family dashboard on Cloudflare Pages
 
-## 4. Verify evidence cleanup schedule
+The configured app URL is `https://companion-family.pages.dev`, and the local `.env` already has that dashboard URL. To make Git-based Cloudflare Pages deployments generate their ignored runtime config:
 
-The user reports that Cron schedule job ID 1 is configured for daily 02:30 UTC and that both secrets are in Vault. After its next scheduled run, use the Supabase SQL Editor to inspect the result (read-only):
+1. In Cloudflare Dashboard, open **Workers & Pages** → **companion-family** → **Settings** → **Builds & deployments** → **Build configuration**.
+2. First commit and push the local `scripts/build-dashboard.mjs` and `package.json` script change to the Git repository connected to this Pages project. Then set the root directory to the repository root (leave the field blank if Cloudflare already uses the repo root), build command to `npm run dashboard:build`, and build output directory to `dashboard`.
+3. Under **Environment variables**, add these two variables for both Production and Preview, using values from the project's Supabase API settings and the local `.env` (the URL and publishable/anon key only): `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY`.
+4. Save and trigger a new deployment. The build script generates `dashboard/config.js`; that file is intentionally ignored by Git so credentials are not committed. The publishable key is designed for browser clients. Never put a service-role or Resend key in Cloudflare Pages.
+5. Open `https://companion-family.pages.dev` and verify the sign-in screen appears. The dashboard uses the Pages domain as its auth email redirect; if Supabase rejects it, add `https://companion-family.pages.dev/**` under Supabase Dashboard → **Authentication** → **URL Configuration** → **Redirect URLs**.
+6. In Supabase Dashboard → **Edge Functions** → **Secrets**, set `COMPANION_DASHBOARD_URL` to exactly `https://companion-family.pages.dev` (no trailing path or query string). This makes notification messages link to the hosted dashboard.
+
+The build script can also be run locally with `npm run dashboard:build`; it reads `.env` and writes the ignored `dashboard/config.js` without printing the key.
+
+## 4. Apply emergency-resolution SQL
+
+In Supabase Dashboard → **SQL Editor** → **New query**, open `supabase/migrations/202611180001_emergency_resolution.sql`, paste the complete file, and click **Run**. Verify it exists with this read-only query:
+
+```sql
+select routine_schema, routine_name
+from information_schema.routines
+where routine_schema = 'public' and routine_name = 'resolve_emergency';
+```
+
+The expected result is one row. Do not run the SQL more than once unless it reports an error; its statements are safe to reapply, but a successful result is enough.
+
+## 5. Verify the evidence cleanup schedule
+
+The user reports that Vault secrets are saved and job ID 1 is scheduled for 02:30 UTC. After that scheduled time, run this read-only query in SQL Editor:
 
 ```sql
 select jobid, runid, status, return_message, start_time, end_time
@@ -39,30 +59,35 @@ order by start_time desc
 limit 5;
 ```
 
-Do not invoke the cleanup function manually against production; it deletes expired evidence objects.
+Confirm the latest row has a successful status. Do not manually invoke the cleanup function: it permanently deletes expired evidence files.
 
-## 5. Build and test on the Honor X5c (last)
+## 6. Test the hosted dashboard and Supabase with disposable accounts
 
-After the function and dashboard setup is ready, connect the phone with USB debugging enabled. In PowerShell from the project folder run:
+Use two test accounts you control and add only the Resend account-owner address as a test trusted-contact email if you want to exercise notification delivery. Do not use personal safety contacts.
+
+1. Sign in on the app with test account A and add the test contact.
+2. Start a short journey and grant account B access using B's registered email.
+3. Sign in to `https://companion-family.pages.dev` as B, paste the journey ID shared by A, and confirm the map/location timestamp updates while A's journey is active.
+4. With A still in the journey, test route deviation on a quiet, controlled route and inspect the recorded status. Do not test by triggering the SOS while real contacts are configured.
+5. Test evidence permission, upload, signed download, expiry metadata, and delete controls using only the test journey. Provider acceptance is not proof of inbox delivery.
+6. Test account deletion only on a disposable account after confirming it has no data you need.
+
+These account-level tests require your logged-in Dashboard session and test accounts; this workspace cannot safely impersonate them or confirm production delivery.
+
+## 7. Evaluate the audio model (requires a code change and corpus)
+
+Do not describe YAMNet scream/shout detection as reliable until measured. The current service does not export every model window's scores, so alert history alone cannot produce valid precision, recall, or false-positive rates. A consent-gated score logging/export mode must be added before collecting evaluation predictions. This can be done during the upcoming phone test phase; it must not store raw audio. Then use a consented, labeled corpus containing distress and varied background audio and record device latency, memory and battery measurements. Keep personal recordings private; do not upload raw evidence to the app's emergency bucket for evaluation.
+
+After that score-export mode exists, run the existing evaluator on a CSV with columns `actual,predicted,duration_seconds` and optional `latency_ms,memory_mb,battery_delta_percent`:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1 -BuildTarget physical
+node scripts/evaluate-audio-metrics.mjs .\path\to\consented-predictions.csv
 ```
 
-The resulting debug APK is `android/app/build/outputs/apk/debug/app-debug.apk`. This build includes the current source; the older APK already in that path does not. Install the new APK by copying it to the phone and opening it, or with `adb install -r android/app/build/outputs/apk/debug/app-debug.apk` if Android Platform Tools are available.
+It reports precision, recall, false negatives and false positives per background hour. The CSV evaluator is implemented and tested, but score export and a consented test corpus are not ready yet, so no model quality result can be reported now. Background custom-phrase recognition also remains unavailable; configured phrases currently use OS speech recognition while the app is foregrounded.
 
-On the phone, grant the requested location, microphone, camera (only if evidence recording is enabled), and notification permissions. Test a stationary route first with a test contact, then separately test route deviation, check-in cancellation, and evidence access. For the full background test, verify process kill/restart, reboot, battery saver, permission revocation, low battery, and network loss. Do not trigger real contacts during distress-classifier experiments.
+## 8. Install and test on the Honor X5c — last
 
-The monitor's JVM tests need to be rerun when the local Gradle cache responds. In this environment the initial wrapper attempt was blocked from downloading Gradle and a retry using the short cache remained silent; the Android service and physical device behavior are therefore not signed off.
+The current APK is already built at `android/app/build/outputs/apk/debug/app-debug.apk` for `arm64-v8a`. No device was connected when ADB was checked. When you are ready, connect the Honor by USB, enable Developer options → **USB debugging**, accept the authorization prompt, then tell me. I’ll verify ADB sees the phone, install this APK, and guide the tests together.
 
-## 6. Audio model evaluation
-
-This step is **not ready to run yet**: the current Android service only exposes an event when a score crosses its check-in threshold; it does not export every model window. The evaluator below cannot produce meaningful recall or false-positive-per-hour results from event-only records. A consented evaluation mode that exports per-window scores without storing audio is still required. Do not manually invent the `predicted` values or interpret the current app's alert count as classifier accuracy.
-
-Once that evaluation mode is added, use only recordings made with informed consent. Include varied background conditions and actual scream/shout samples, and label each evaluated window as `distress` or `background`. Save predictions and measurements in a CSV with columns:
-
-```csv
-actual,predicted,duration_seconds,latency_ms,memory_mb,battery_delta_percent
-```
-
-Then run `node scripts/evaluate-audio-metrics.mjs path\\to\\predictions.csv`. Report corpus conditions and duration alongside the output. Do not use synthetic or web audio alone to claim real-world safety accuracy.
+Do not test simulated screams/falls around other people or with real contacts configured. We’ll first verify launch, permissions, journey start/stop, live GPS, and notification status; then test check-in/resolution, evidence and background behavior with the disposable accounts.

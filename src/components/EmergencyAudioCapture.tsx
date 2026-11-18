@@ -1,12 +1,9 @@
 import { useEffect, useRef } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { AppState } from 'react-native';
 import { AudioModule, RecordingPresets, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
-import { uploadEmergencyEvidence } from '../services/evidence';
+import { enqueueEmergencyEvidence, loadEvidenceOutbox, uploadPendingEmergencyEvidence } from '../services/evidence';
 import { ACTIVE_JOURNEY_KEY } from '../services/journeys';
-
-const EVIDENCE_KEY = 'companion-emergency-audio-evidence-v1';
-
-type EvidenceRecord = { eventId: string; uri: string; recordedAt: number; durationSeconds: number; evidenceId?: string; expiresAt?: number };
 
 /** Opt-in, post-alert audio evidence. The app uploads it privately and sends contacts a short-lived access link. */
 export default function EmergencyAudioCapture({
@@ -26,14 +23,22 @@ export default function EmergencyAudioCapture({
   useEffect(() => { statusRef.current = onStatus; }, [onStatus]);
 
   useEffect(() => {
+    const retry = () => {
+      void uploadPendingEmergencyEvidence({ onStatus: (message) => statusRef.current(message) });
+    };
+    retry();
+    const interval = setInterval(retry, 30_000);
+    const appState = AppState.addEventListener('change', (state) => { if (state === 'active') retry(); });
+    return () => { clearInterval(interval); appState.remove(); };
+  }, []);
+
+  useEffect(() => {
     if (!eventId || !consent || recordingEventRef.current === eventId) return;
     let cancelled = false;
     recordingEventRef.current = eventId;
     (async () => {
       try {
-        const raw = await AsyncStorage.getItem(EVIDENCE_KEY);
-        const saved: EvidenceRecord[] = raw ? JSON.parse(raw) : [];
-        if (saved.some((item) => item.eventId === eventId)) return;
+        if ((await loadEvidenceOutbox()).some((item) => item.eventId === eventId && item.type === 'audio')) return;
         const permission = await AudioModule.getRecordingPermissionsAsync();
         if (!permission.granted) {
           statusRef.current('Audio evidence unavailable: microphone permission is not granted');
@@ -50,27 +55,12 @@ export default function EmergencyAudioCapture({
               await recorder.stop();
               const uri = recorder.uri;
               if (!uri) throw new Error('The recorder did not return an audio file.');
-              const currentRaw = await AsyncStorage.getItem(EVIDENCE_KEY);
-              const current: EvidenceRecord[] = currentRaw ? JSON.parse(currentRaw) : [];
-              await AsyncStorage.setItem(EVIDENCE_KEY, JSON.stringify([
-                ...current.filter((item) => item.eventId !== eventId),
-                { eventId, uri, recordedAt: Date.now(), durationSeconds: 20 },
-              ].slice(-50)));
               const journeyId = await AsyncStorage.getItem(ACTIVE_JOURNEY_KEY);
-              if (!journeyId) {
-                statusRef.current('Audio saved locally; sign in and connect a journey to upload it securely');
-                return;
-              }
-              const uploaded = await uploadEmergencyEvidence({ uri, journeyId, eventId, type: 'audio', durationSeconds: 20 });
-              const latestRaw = await AsyncStorage.getItem(EVIDENCE_KEY);
-              const latest: EvidenceRecord[] = latestRaw ? JSON.parse(latestRaw) : [];
-              await AsyncStorage.setItem(EVIDENCE_KEY, JSON.stringify(latest.map((item) => item.eventId === eventId
-                ? { ...item, evidenceId: uploaded.evidenceId, expiresAt: uploaded.expiresAt }
-                : item)));
-              const delivery = uploaded.notifications?.status;
-              statusRef.current(delivery === 'accepted' || delivery === 'partial'
-                ? 'SOS audio uploaded privately; email provider accepted the temporary link request'
-                : 'SOS audio uploaded privately; the email link was not accepted by the configured provider');
+              await enqueueEmergencyEvidence({ uri, journeyId, eventId, type: 'audio', durationSeconds: 20 });
+              statusRef.current(journeyId
+                ? 'Audio evidence saved privately; secure upload is queued.'
+                : 'Audio evidence saved privately on this device; upload waits for a signed-in journey.');
+              await uploadPendingEmergencyEvidence({ onStatus: (message) => statusRef.current(message) });
             } catch (error) {
               statusRef.current(`Audio evidence failed: ${error instanceof Error ? error.message : 'recording could not be saved'}`);
             }

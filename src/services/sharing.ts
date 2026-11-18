@@ -15,6 +15,14 @@ export async function activateEmergency(journeyId: string, reason = 'Manual SOS'
   return data as { eventId: string | null; duplicate?: boolean; status?: string };
 }
 
+export async function resolveEmergency(journeyId: string, eventId: string) {
+  const { error } = await requireSupabase().rpc('resolve_emergency', {
+    p_journey_id: journeyId,
+    p_event_id: eventId,
+  });
+  if (error) throw error;
+}
+
 export async function reportRouteDeviation(
   journeyId: string,
   location: { latitude: number; longitude: number; timestamp: number },

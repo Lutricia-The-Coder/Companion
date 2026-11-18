@@ -8,7 +8,7 @@ import {
   type TriggerPhraseStorage,
 } from '../services/triggerPhrases';
 
-const C = { panel: '#17263B', ink: '#F4F7FB', muted: '#9BAABD', teal: '#5CE0C0', line: '#2D4058', red: '#FF6B6B', amber: '#FFC96B' };
+const C = { panel: '#F0F0EF', ink: '#151515', muted: '#707070', teal: '#D52B37', line: '#E3E3E2', red: '#D52B37', amber: '#D52B37' };
 
 export default function TriggerPhraseManager({ onPrimaryPhraseChange }: { onPrimaryPhraseChange?: (phrase: string) => void }) {
   const [phrases, setPhrases] = useState<TriggerPhrase[]>([]);
@@ -102,7 +102,7 @@ const s = StyleSheet.create({
   phrase: { color: C.ink, fontSize: 14, fontWeight: '700', marginBottom: 5 }, option: { color: C.amber, fontSize: 10, marginTop: 5 },
   remove: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }, removeText: { color: C.red, fontSize: 25 },
   input: { color: C.ink, fontSize: 13, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.line, marginTop: 8 },
-  addButton: { minHeight: 44, marginTop: 10, borderRadius: 10, backgroundColor: C.teal, alignItems: 'center', justifyContent: 'center' }, addText: { color: '#0D2630', fontSize: 12, fontWeight: '800' },
+  addButton: { minHeight: 44, marginTop: 10, borderRadius: 10, backgroundColor: C.teal, alignItems: 'center', justifyContent: 'center' }, addText: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
   storage: { fontSize: 10, lineHeight: 15, marginTop: 12 },
-  warning: { backgroundColor: '#382C25', borderWidth: 1, borderColor: '#6A503A', borderRadius: 14, padding: 14, marginTop: 13 }, warningTitle: { color: C.amber, fontSize: 12, fontWeight: '800' }, warningBody: { color: '#D4C3AE', fontSize: 11, lineHeight: 17, marginTop: 5 },
+  warning: { backgroundColor: '#FBEDEF', borderWidth: 1, borderColor: '#EDB7BC', borderRadius: 14, padding: 14, marginTop: 13 }, warningTitle: { color: C.amber, fontSize: 12, fontWeight: '800' }, warningBody: { color: '#7A5558', fontSize: 11, lineHeight: 17, marginTop: 5 },
 });

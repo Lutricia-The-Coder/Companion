@@ -20,8 +20,10 @@ declare class CompanionMonitorNative extends NativeModule<{
     audioEnabled: boolean;
   }): Promise<boolean>;
   stopMonitoring(): Promise<void>;
+  triggerEmergency(reason: string): Promise<boolean>;
+  resolveEmergency(): Promise<void>;
   setBackgroundAudioEnabled(enabled: boolean): Promise<void>;
-  getStatus(): Promise<{ running: boolean; lastSignal?: MonitorSignal | null }>;
+  getStatus(): Promise<{ running: boolean; lastSignal?: MonitorSignal | null; status?: string | null; emergencyPending?: boolean }>;
 }
 
 export default requireOptionalNativeModule<CompanionMonitorNative>('CompanionMonitor');

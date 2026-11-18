@@ -48,6 +48,22 @@ class CompanionMonitorModule : Module() {
       }
     }
 
+    AsyncFunction("triggerEmergency") { reason: String ->
+      val context = appContext.reactContext?.applicationContext
+        ?: throw IllegalStateException("Application context is unavailable.")
+      context.startService(Intent(context, CompanionMonitorService::class.java)
+        .setAction(CompanionMonitorService.ACTION_TRIGGER_EMERGENCY)
+        .putExtra(CompanionMonitorService.EXTRA_EMERGENCY_REASON, reason.take(500)))
+      true
+    }
+
+    AsyncFunction("resolveEmergency") {
+      appContext.reactContext?.applicationContext?.let { context ->
+        context.startService(Intent(context, CompanionMonitorService::class.java)
+          .setAction(CompanionMonitorService.ACTION_RESOLVE_EMERGENCY))
+      }
+    }
+
     AsyncFunction("getStatus") {
       val context = appContext.reactContext?.applicationContext
         ?: throw IllegalStateException("Application context is unavailable.")
@@ -55,6 +71,8 @@ class CompanionMonitorModule : Module() {
       mapOf(
         "running" to prefs.getBoolean("running", false),
         "lastSignal" to prefs.getString("lastSignal", null),
+        "status" to prefs.getString("status", null),
+        "emergencyPending" to prefs.getBoolean("emergencyPending", false),
       )
     }
   }

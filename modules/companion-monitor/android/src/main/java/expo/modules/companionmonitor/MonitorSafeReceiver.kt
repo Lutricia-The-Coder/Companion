@@ -8,7 +8,7 @@ class MonitorSafeReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent?) {
     if (intent?.action == CompanionMonitorService.ACTION_CONFIRM_SAFE) {
       context.getSharedPreferences(CompanionMonitorService.PREFS, Context.MODE_PRIVATE)
-        .edit().putBoolean("checkInPending", false).apply()
+        .edit().putBoolean("checkInPending", false).remove("checkInDeadlineAt").apply()
       context.startService(Intent(context, CompanionMonitorService::class.java).setAction(CompanionMonitorService.ACTION_CONFIRM_SAFE))
     }
   }

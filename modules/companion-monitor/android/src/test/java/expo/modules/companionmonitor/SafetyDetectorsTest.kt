@@ -4,6 +4,20 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SafetyDetectorsTest {
+  @Test fun disabledBackgroundAudioNeverRestartsEvenWhenPermissionIsGranted() {
+    assertFalse(MonitorRecoveryPolicy.shouldStartBackgroundAudio(userEnabled = false, microphonePermissionGranted = true))
+    assertFalse(MonitorRecoveryPolicy.shouldStartBackgroundAudio(userEnabled = false, microphonePermissionGranted = false))
+    assertTrue(MonitorRecoveryPolicy.shouldStartBackgroundAudio(userEnabled = true, microphonePermissionGranted = true))
+    assertFalse(MonitorRecoveryPolicy.shouldStartBackgroundAudio(userEnabled = true, microphonePermissionGranted = false))
+  }
+
+  @Test fun interruptedCheckInRetainsItsDeadlineAndExpiredChecksRunImmediately() {
+    assertEquals(4_000L, MonitorRecoveryPolicy.remainingCheckInDelay(10_000L, 14_000L))
+    assertEquals(0L, MonitorRecoveryPolicy.remainingCheckInDelay(14_000L, 10_000L))
+    assertEquals(30_000L, MonitorRecoveryPolicy.restoreCheckInDeadline(10_000L, null, 20_000L))
+    assertEquals(14_000L, MonitorRecoveryPolicy.restoreCheckInDeadline(10_000L, 14_000L, 20_000L))
+  }
+
   @Test fun fallRequiresFreeFallAndSufficientImpactWithinWindow() {
     val detector = FallImpactDetector()
     assertNull(detector.onAcceleration(0f, 0f, 0f, 1_000))

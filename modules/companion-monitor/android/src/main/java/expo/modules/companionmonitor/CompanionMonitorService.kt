@@ -1,5 +1,6 @@
 package expo.modules.companionmonitor
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -18,6 +19,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.content.pm.PackageManager
 import androidx.core.app.NotificationCompat
 import org.tensorflow.lite.Interpreter
 import org.json.JSONObject
@@ -45,6 +47,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
   private var screamThreshold = 0.82f
   private var emergencyRetryAttempts = 0
   private var pendingEmergencyReason = ""
+  private var checkInRunnable: Runnable? = null
   private val emergencyRetryDelays = longArrayOf(2_000, 5_000, 15_000, 30_000, 60_000, 120_000)
   @Volatile private var monitoring = false
   @Volatile private var audioMonitoring = false
@@ -62,18 +65,40 @@ class CompanionMonitorService : Service(), SensorEventListener {
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     when (intent?.action) {
-      ACTION_STOP -> { stopMonitoring(); stopSelf(); return START_NOT_STICKY }
+      ACTION_STOP -> {
+        clearPendingCheckIn()
+        stopMonitoring()
+        stopSelf()
+        return START_NOT_STICKY
+      }
+      ACTION_TRIGGER_EMERGENCY -> {
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        if (journeyId.isBlank()) journeyId = prefs.getString("journeyId", "").orEmpty()
+        val reason = intent.getStringExtra(EXTRA_EMERGENCY_REASON)?.take(500) ?: "Automatic distress detection"
+        if (journeyId.isBlank()) publishStatus("Emergency request is pending, but no active journey is connected.")
+        else activateEmergency(reason)
+        return START_STICKY
+      }
+      ACTION_RESOLVE_EMERGENCY -> {
+        resolveEmergencyMonitoring()
+        return START_STICKY
+      }
       ACTION_CONFIRM_SAFE -> { confirmSafe(); return START_STICKY }
       ACTION_SET_AUDIO -> {
         val enabled = intent.getBooleanExtra(EXTRA_AUDIO_ENABLED, false)
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("backgroundAudioEnabled", enabled).apply()
         if (enabled && monitoring && !audioMonitoring) startAudioMonitor()
-        else if (!enabled) stopAudioCapture()
+        else {
+          if (!enabled) stopAudioCapture()
+          if (monitoring) startForeground(NOTIFICATION_ID, monitoringNotification())
+        }
         return START_STICKY
       }
       ACTION_START -> {
-        journeyId = intent.getStringExtra(EXTRA_JOURNEY_ID).orEmpty()
+        val nextJourneyId = intent.getStringExtra(EXTRA_JOURNEY_ID).orEmpty()
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        if (prefs.getString("journeyId", null) != nextJourneyId) clearPendingCheckIn()
+        journeyId = nextJourneyId
         val editor = prefs.edit().putString("journeyId", journeyId)
           .putString("supabaseUrl", intent.getStringExtra(EXTRA_SUPABASE_URL).orEmpty())
           .putString("publishableKey", intent.getStringExtra(EXTRA_PUBLISHABLE_KEY).orEmpty())
@@ -82,31 +107,54 @@ class CompanionMonitorService : Service(), SensorEventListener {
         val audioEnabled = intent.getBooleanExtra(EXTRA_AUDIO_ENABLED, false)
         editor.putBoolean("running", true).putBoolean("backgroundAudioEnabled", audioEnabled).apply()
         screamThreshold = intent.getFloatExtra(EXTRA_SCREAM_THRESHOLD, 0.82f).coerceIn(0.5f, 0.99f)
+        if (prefs.getBoolean("emergencyActive", false)) {
+          val reason = prefs.getString("pendingEmergencyReason", null)
+          val pendingJourneyId = prefs.getString("pendingEmergencyJourneyId", journeyId)
+          emergencySent = true
+          monitoring = false
+          startForeground(NOTIFICATION_ID, monitoringNotification())
+          if (prefs.getBoolean("emergencyPending", false) && !reason.isNullOrBlank() && !pendingJourneyId.isNullOrBlank()) {
+            emergencyRetryAttempts = prefs.getInt("emergencyRetryAttempts", 0)
+            pendingEmergencyReason = reason
+            attemptEmergencyDelivery(reason, pendingJourneyId)
+          }
+          return START_STICKY
+        }
         monitoring = true
         if (audioEnabled && !audioMonitoring) startAudioMonitor()
-        else startForeground(NOTIFICATION_ID, monitoringNotification())
+        else {
+          if (!audioEnabled) stopAudioCapture()
+          startForeground(NOTIFICATION_ID, monitoringNotification())
+        }
+        if (prefs.getBoolean("checkInPending", false)) restorePendingCheckIn(prefs)
       }
       null -> {
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
-        if (prefs.getBoolean("emergencyPending", false)) {
+        if (prefs.getBoolean("emergencyActive", false)) {
           val reason = prefs.getString("pendingEmergencyReason", null)
           val pendingJourneyId = prefs.getString("pendingEmergencyJourneyId", null)
-          if (!reason.isNullOrBlank() && !pendingJourneyId.isNullOrBlank()) {
-            journeyId = pendingJourneyId
-            monitoring = false
-            emergencySent = true
+          journeyId = pendingJourneyId ?: prefs.getString("journeyId", "").orEmpty()
+          monitoring = false
+          emergencySent = true
+          startForeground(NOTIFICATION_ID, monitoringNotification())
+          if (prefs.getBoolean("emergencyPending", false) && !reason.isNullOrBlank() && journeyId.isNotBlank()) {
             emergencyRetryAttempts = prefs.getInt("emergencyRetryAttempts", 0)
             pendingEmergencyReason = reason
-            startForeground(NOTIFICATION_ID, monitoringNotification())
-            attemptEmergencyDelivery(reason, pendingJourneyId)
-            return START_STICKY
+            attemptEmergencyDelivery(reason, journeyId)
           }
+          return START_STICKY
         }
         journeyId = prefs.getString("journeyId", "").orEmpty()
         if (prefs.getBoolean("running", false) && journeyId.isNotBlank()) {
           monitoring = true
-          if (!audioMonitoring && (prefs.getBoolean("backgroundAudioEnabled", false) || prefs.getString("refreshToken", null) != null)) startAudioMonitor()
+          if (!audioMonitoring && MonitorRecoveryPolicy.shouldStartBackgroundAudio(
+              prefs.getBoolean("backgroundAudioEnabled", false), hasMicrophonePermission(),
+            )) startAudioMonitor()
           else startForeground(NOTIFICATION_ID, monitoringNotification())
+          if (prefs.getBoolean("backgroundAudioEnabled", false) && !hasMicrophonePermission()) {
+            publishStatus("Background audio is paused because microphone permission is unavailable. Motion monitoring continues.")
+          }
+          if (prefs.getBoolean("checkInPending", false)) restorePendingCheckIn(prefs)
         }
       }
     }
@@ -125,6 +173,13 @@ class CompanionMonitorService : Service(), SensorEventListener {
 
   private fun startAudioMonitor() {
     if (audioMonitoring) return
+    if (!MonitorRecoveryPolicy.shouldStartBackgroundAudio(
+        getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("backgroundAudioEnabled", false),
+        hasMicrophonePermission(),
+      )) {
+      publishStatus("Background audio is off. Enable it and grant microphone permission to use sound monitoring.")
+      return
+    }
     audioMonitoring = true
     getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("running", true).apply()
     startForeground(NOTIFICATION_ID, monitoringNotification())
@@ -243,17 +298,44 @@ class CompanionMonitorService : Service(), SensorEventListener {
   private fun requestCheckIn(reason: String, confidence: Float, timestamp: Long) {
     val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
     if (prefs.getBoolean("checkInPending", false) || emergencySent) return
-    prefs.edit().putBoolean("checkInPending", true).apply()
+    val deadline = System.currentTimeMillis() + CHECK_IN_MS
+    prefs.edit().putBoolean("checkInPending", true).putLong("checkInDeadlineAt", deadline).apply()
     showAlertNotification("Check in now", "$reason. Companion will alert your trusted contacts if you do not confirm you're safe.", safeAction = true)
-    handler.postDelayed({
+    schedulePendingCheckIn(deadline)
+  }
+
+  private fun schedulePendingCheckIn(deadline: Long) {
+    checkInRunnable?.let(handler::removeCallbacks)
+    val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+    val task = Runnable {
+      checkInRunnable = null
       if (prefs.getBoolean("checkInPending", false) && !emergencySent) {
         activateEmergency("No response to the background safety check-in.")
       }
-    }, CHECK_IN_MS)
+    }
+    checkInRunnable = task
+    handler.postDelayed(task, MonitorRecoveryPolicy.remainingCheckInDelay(System.currentTimeMillis(), deadline))
+  }
+
+  private fun restorePendingCheckIn(prefs: android.content.SharedPreferences) {
+    val deadline = MonitorRecoveryPolicy.restoreCheckInDeadline(
+      System.currentTimeMillis(), prefs.takeIf { it.contains("checkInDeadlineAt") }?.getLong("checkInDeadlineAt", 0L), CHECK_IN_MS,
+    )
+    prefs.edit().putLong("checkInDeadlineAt", deadline).apply()
+    schedulePendingCheckIn(deadline)
+  }
+
+  private fun clearPendingCheckIn() {
+    checkInRunnable?.let(handler::removeCallbacks)
+    checkInRunnable = null
+    getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+      .putBoolean("checkInPending", false)
+      .remove("checkInDeadlineAt")
+      .apply()
   }
 
   private fun confirmSafe() {
-    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("checkInPending", false).apply()
+    clearPendingCheckIn()
     pendingSignalAt = 0
     pendingSignalConfidence = 0f
     soundScorer.reset()
@@ -261,6 +343,29 @@ class CompanionMonitorService : Service(), SensorEventListener {
     emergencySent = false
     handler.removeCallbacksAndMessages(null)
     showAlertNotification("Safety check confirmed", "Background monitoring continues during this journey.", safeAction = false)
+  }
+
+  private fun resolveEmergencyMonitoring() {
+    val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+    if (journeyId.isBlank()) journeyId = prefs.getString("journeyId", "").orEmpty()
+    emergencySent = false
+    emergencyRetryAttempts = 0
+    pendingEmergencyReason = ""
+    clearPendingCheckIn()
+    handler.removeCallbacksAndMessages(null)
+    prefs.edit()
+      .putBoolean("emergencyActive", false)
+      .putBoolean("emergencyPending", false)
+      .putBoolean("running", true)
+      .putInt("emergencyRetryAttempts", 0)
+      .remove("pendingEmergencyReason")
+      .remove("pendingEmergencyJourneyId")
+      .remove("emergencyRetryAttempts")
+      .apply()
+    monitoring = journeyId.isNotBlank()
+    if (monitoring && prefs.getBoolean("backgroundAudioEnabled", false) && hasMicrophonePermission()) startAudioMonitor()
+    else startForeground(NOTIFICATION_ID, monitoringNotification())
+    showAlertNotification("Emergency resolved", "The emergency is marked resolved. Monitoring continues while this journey remains active.", safeAction = false)
   }
 
   private fun activateEmergency(reason: String) {
@@ -271,7 +376,9 @@ class CompanionMonitorService : Service(), SensorEventListener {
     pendingEmergencyReason = reason
     emergencyRetryAttempts = 0
     getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+      .putBoolean("emergencyActive", true)
       .putBoolean("checkInPending", false)
+      .remove("checkInDeadlineAt")
       .putBoolean("emergencyPending", true)
       .putString("pendingEmergencyReason", reason)
       .putString("pendingEmergencyJourneyId", journeyId)
@@ -386,6 +493,9 @@ class CompanionMonitorService : Service(), SensorEventListener {
     try { audioRecord?.stop() } catch (_: Exception) { }
   }
 
+  private fun hasMicrophonePermission() =
+    checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
   private fun publishStatus(message: String) {
     getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("status", message).apply()
     showAlertNotification("Companion monitor", message, safeAction = false)
@@ -403,7 +513,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
   private fun monitoringNotification(): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
     .setSmallIcon(android.R.drawable.ic_lock_lock)
     .setContentTitle("Companion safety monitoring active")
-    .setContentText(if (audioMonitoring) "On-device audio and motion checks are running for this journey." else "Personal phrase monitoring is active in the app; native motion checks stay on.")
+    .setContentText(if (audioMonitoring) "On-device audio and motion checks are running for this journey." else "Native motion checks are on; background audio monitoring is off.")
     .setOngoing(true)
     .setCategory(NotificationCompat.CATEGORY_SERVICE)
     .build()
@@ -433,6 +543,8 @@ class CompanionMonitorService : Service(), SensorEventListener {
     const val PREFS = "companion_native_monitor"
     const val ACTION_START = "expo.modules.companionmonitor.START"
     const val ACTION_STOP = "expo.modules.companionmonitor.STOP"
+    const val ACTION_TRIGGER_EMERGENCY = "expo.modules.companionmonitor.TRIGGER_EMERGENCY"
+    const val ACTION_RESOLVE_EMERGENCY = "expo.modules.companionmonitor.RESOLVE_EMERGENCY"
     const val ACTION_CONFIRM_SAFE = "expo.modules.companionmonitor.CONFIRM_SAFE"
     const val ACTION_SET_AUDIO = "expo.modules.companionmonitor.SET_AUDIO"
     const val EXTRA_JOURNEY_ID = "journeyId"
@@ -442,6 +554,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
     const val EXTRA_REFRESH_TOKEN = "refreshToken"
     const val EXTRA_SCREAM_THRESHOLD = "screamThreshold"
     const val EXTRA_AUDIO_ENABLED = "audioEnabled"
+    const val EXTRA_EMERGENCY_REASON = "emergencyReason"
     private const val CHANNEL_ID = "companion-safety-monitor"
     private const val NOTIFICATION_ID = 48101
     private const val ALERT_NOTIFICATION_ID = 48102

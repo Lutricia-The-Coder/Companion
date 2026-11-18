@@ -8,7 +8,7 @@ import { ACTIVE_ROUTE_KEY, LAST_LOCATION_KEY, LOCATION_TASK, ROUTE_DEVIATION_COU
 import { ACTIVE_JOURNEY_KEY, createJourney, finishJourney, publishLocation } from './src/services/journeys';
 import { supabase, supabaseConfig, supabaseReady } from './src/lib/supabase';
 import { rememberJourneyId, saveTrustedContacts } from './src/services/profile';
-import { activateEmergency, grantTrustedContactAccess } from './src/services/sharing';
+import { activateEmergency, grantTrustedContactAccess, resolveEmergency as resolveEmergencyEvent } from './src/services/sharing';
 import LiveLocationMap from './src/components/LiveLocationMap';
 import TriggerPhraseManager from './src/components/TriggerPhraseManager';
 import EmergencyHistory from './src/components/EmergencyHistory';
@@ -51,13 +51,20 @@ async function sendEmergencyStatus(reason = 'Manual SOS') {
   }
   try {
     const result = await activateEmergency(journeyId, reason);
+    let eventId = result.eventId;
+    if (!eventId && result.duplicate && supabase) {
+      const { data } = await supabase.from('safety_events').select('id')
+        .eq('journey_id', journeyId).eq('event_type', 'emergency')
+        .order('activated_at', { ascending: false }).limit(1).maybeSingle();
+      eventId = data?.id ?? null;
+    }
     Alert.alert(
       result.duplicate ? 'Emergency already active' : 'Emergency activated',
       result.duplicate
         ? 'Your existing emergency alert is still active. Trusted contacts are not being sent duplicate alerts.'
         : 'The server recorded your emergency and is attempting to contact your trusted people. Provider acceptance is shown separately from delivery.',
     );
-    return result;
+    return { ...result, eventId };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'The emergency could not reach the secure backend.';
     Alert.alert('SOS could not sync', `${message}\n\nTry again if you can. This build cannot contact emergency services directly.`);
@@ -66,15 +73,15 @@ async function sendEmergencyStatus(reason = 'Manual SOS') {
 }
 
 const colors = {
-  navy: '#101C2E',
-  panel: '#17263B',
-  panel2: '#1D3048',
-  ink: '#F4F7FB',
-  muted: '#9BAABD',
-  teal: '#5CE0C0',
-  red: '#FF6B6B',
-  line: '#2D4058',
-  yellow: '#FFC96B',
+  navy: '#F7F7F6',
+  panel: '#F0F0EF',
+  panel2: '#E8E8E7',
+  ink: '#151515',
+  muted: '#707070',
+  teal: '#D52B37',
+  red: '#D52B37',
+  line: '#E3E3E2',
+  yellow: '#D52B37',
 };
 
 export default function App({ screen = 'journey' }: { screen?: 'journey' | 'people' | 'settings' | 'history' }) {
@@ -84,6 +91,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
   const [appForeground, setAppForeground] = useState(AppState.currentState === 'active');
   const [emergencyMode, setEmergencyMode] = useState(false);
   const [emergencyEventId, setEmergencyEventId] = useState<string | null>(null);
+  const [resolvingEmergency, setResolvingEmergency] = useState(false);
   const [journeyId, setJourneyId] = useState<string | null>(null);
   const [evidenceConsent, setEvidenceConsent] = useState(false);
   const [backgroundAudioAllowed, setBackgroundAudioAllowed] = useState(true);
@@ -116,6 +124,49 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
     const timer = setInterval(refresh, 10_000);
     return () => { clearTimeout(initial); clearInterval(timer); };
   }, []);
+
+  useEffect(() => {
+    if (!journeyId || !supabaseReady || !supabase) return;
+    const client = supabase;
+    let cancelled = false;
+    const restoreEmergencyState = async () => {
+      try {
+        const { data: journey } = await client.from('journeys').select('emergency').eq('id', journeyId).maybeSingle();
+        if (cancelled || !journey?.emergency) return;
+        const { data: event } = await client.from('safety_events').select('id').eq('journey_id', journeyId)
+          .eq('event_type', 'emergency').neq('status', 'resolved')
+          .order('activated_at', { ascending: false }).limit(1).maybeSingle();
+        if (cancelled) return;
+        setEmergencyMode(true);
+        if (event?.id) {
+          setEmergencyEventId(event.id);
+          await AsyncStorage.setItem('companion-emergency-event-id', event.id);
+        }
+      } catch { /* Keep local emergency mode and location state when the backend is unreachable. */ }
+    };
+    void restoreEmergencyState();
+    return () => { cancelled = true; };
+  }, [journeyId]);
+
+  useEffect(() => {
+    if (!emergencyMode || emergencyEventId || !journeyId || !supabase) return;
+    const client = supabase;
+    let cancelled = false;
+    const findEmergency = async () => {
+      try {
+        const { data } = await client.from('safety_events').select('id').eq('journey_id', journeyId)
+          .eq('event_type', 'emergency').neq('status', 'resolved')
+          .order('activated_at', { ascending: false }).limit(1).maybeSingle();
+        if (!cancelled && data?.id) {
+          setEmergencyEventId(data.id);
+          await AsyncStorage.setItem('companion-emergency-event-id', data.id);
+        }
+      } catch { /* The next retry will check again after connectivity returns. */ }
+    };
+    void findEmergency();
+    const timer = setInterval(() => { void findEmergency(); }, 10_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [emergencyMode, emergencyEventId, journeyId]);
   useEffect(() => {
     (async () => {
       const saved = await AsyncStorage.multiGet([
@@ -357,6 +408,10 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
   };
 
   const stopJourney = async () => {
+    if (emergencyMode) {
+      Alert.alert('Resolve the emergency first', 'Companion keeps the active journey running until you confirm the emergency is resolved.');
+      return false;
+    }
     setActiveSafetyAgent(null);
     safetyAgentRef.current = null;
     if (Platform.OS === 'android') await CompanionMonitor?.stopMonitoring().catch(() => undefined);
@@ -378,6 +433,22 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
     await AsyncStorage.multiRemove([ACTIVE_ROUTE_KEY, ROUTE_ORIGIN_KEY, ROUTE_DEVIATION_COUNT_KEY]);
     routeOriginRef.current = null;
     setLocationLabel(point ? 'Last location saved on this device' : 'Location not shared');
+    return true;
+  };
+
+  const resolveCurrentEmergency = async () => {
+    if (!journeyId || !emergencyEventId || resolvingEmergency) return;
+    setResolvingEmergency(true);
+    try {
+      await resolveEmergencyEvent(journeyId, emergencyEventId);
+      if (Platform.OS === 'android') await CompanionMonitor?.resolveEmergency().catch(() => undefined);
+      await AsyncStorage.removeItem('companion-emergency-event-id');
+      setEmergencyEventId(null);
+      setEmergencyMode(false);
+      Alert.alert('Emergency resolved', 'The event is marked resolved, your live journey is still active, and monitoring has resumed.');
+    } catch (error) {
+      Alert.alert('Could not resolve emergency', error instanceof Error ? error.message : 'Reconnect and try again.');
+    } finally { setResolvingEmergency(false); }
   };
 
   const escalateBackgroundLocation = useCallback(async () => {
@@ -403,12 +474,15 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
   const requestEmergency = useCallback(async (reason: string) => {
     setEmergencyMode(true);
     void escalateBackgroundLocation();
+    if (Platform.OS === 'android' && CompanionMonitor && journeyId) {
+      void CompanionMonitor.triggerEmergency(reason).catch(() => undefined);
+    }
     const result = await sendEmergencyStatus(reason);
-    if (result?.eventId && !result.duplicate) {
+    if (result?.eventId) {
       setEmergencyEventId(result.eventId);
       await AsyncStorage.setItem('companion-emergency-event-id', result.eventId);
     }
-  }, [escalateBackgroundLocation]);
+  }, [escalateBackgroundLocation, journeyId]);
 
   const createJourneySafetyAgent = useCallback(() => {
     const agent = new SafetyAgent((action, reason) => {
@@ -434,11 +508,11 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
       const foreground = state === 'active';
       setAppForeground(foreground);
       if (Platform.OS === 'android' && active && CompanionMonitor) {
-        void CompanionMonitor.setBackgroundAudioEnabled(!foreground && backgroundAudioAllowed).catch(() => undefined);
+        void CompanionMonitor.setBackgroundAudioEnabled(!foreground && backgroundAudioAllowed && !emergencyMode).catch(() => undefined);
       }
     });
     return () => subscription.remove();
-  }, [active, backgroundAudioAllowed]);
+  }, [active, backgroundAudioAllowed, emergencyMode]);
 
   useEffect(() => {
     if (!active || !journeyId || Platform.OS !== 'android' || !CompanionMonitor) return;
@@ -468,12 +542,6 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
       signalSubscription.remove();
     };
   }, [active, journeyId, backgroundAudioAllowed]);
-
-  useEffect(() => {
-    if (Platform.OS === 'android' && emergencyMode && CompanionMonitor) {
-      void CompanionMonitor.setBackgroundAudioEnabled(false).catch(() => undefined);
-    }
-  }, [emergencyMode]);
 
   const onTriggerPhrase = useCallback((phrase: TriggerPhrase, confidence: number) => {
     const isLoudSoundCue = phrase.id === '__loud-sound__';
@@ -532,7 +600,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
 
   return (
     <SafeAreaView style={styles.safe}>
-      <StatusBar style="light" />
+      <StatusBar style="dark" />
       <SpeechMonitor active={active && !emergencyMode && (Platform.OS !== 'android' || appForeground)} phrases={triggerPhrases} onStatus={setVoiceStatus} onPhrase={onTriggerPhrase} />
       <EmergencyAudioCapture eventId={emergencyEventId} consent={evidenceConsent} onStatus={setEvidenceStatus} />
       <EmergencyVideoCapture eventId={emergencyEventId} journeyId={journeyId} consent={evidenceConsent} onStatus={setEvidenceStatus} />
@@ -544,11 +612,22 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
           </View>
           <View style={styles.avatar}><Text style={styles.avatarText}>S</Text></View>
         </View>
+        <View style={styles.safetyNotice}><View style={styles.safetyNoticeDot} /><Text style={styles.safetyNoticeText}>LIVE SAFETY FEATURES DEPEND ON PERMISSIONS AND NETWORK</Text></View>
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
           {tab === 'journey' && <>
-            <View style={styles.eyebrowRow}><Text style={styles.eyebrow}>PERSONAL SAFETY</Text><View style={styles.pilot}><Text style={styles.pilotText}>EARLY ACCESS</Text></View></View>
-            <Text style={styles.title}>Move with{ '\n' }more peace of mind.</Text>
-            <Text style={styles.subtitle}>Start a journey to turn on live location sharing and your safety session.</Text>
+            <View style={styles.eyebrowRow}><Text style={styles.eyebrow}>YOUR SAFETY TODAY</Text><View style={styles.pilot}><Text style={styles.pilotText}>COMPANION</Text></View></View>
+            <Text style={styles.title}>A safer day{ '\n' }starts here.</Text>
+            <Text style={styles.subtitle}>Start a journey to share your live location and activate your safety session.</Text>
+
+            {emergencyMode && <View style={styles.emergencyCard}>
+              <Text style={styles.emergencyHeading}>EMERGENCY MODE IS ACTIVE</Text>
+              <Text style={styles.emergencyBody}>{emergencyEventId ? 'Live location remains active. Confirm that you are safe to resolve this event and resume normal monitoring.' : 'Live location remains active while Companion reconnects to the emergency record.'}</Text>
+              <TouchableOpacity style={[styles.resolveButton, (!emergencyEventId || resolvingEmergency) && styles.resolveButtonDisabled]} disabled={!emergencyEventId || resolvingEmergency} onPress={() => void resolveCurrentEmergency()} accessibilityRole="button">
+                <Text style={styles.resolveButtonText}>{resolvingEmergency ? 'Resolving…' : emergencyEventId ? "I’m safe — resolve emergency" : 'Waiting for emergency record…'}</Text>
+              </TouchableOpacity>
+            </View>}
+
+            <View style={styles.monitorCard}><View style={styles.monitorTop}><View style={[styles.pillDot, active && styles.pillDotOn]} /><Text style={styles.monitorHeading}>{active ? 'Journey monitoring active' : 'Monitoring ready'}</Text></View><Text style={styles.monitorBody}>{active ? 'Live location is updating for your active journey.' : 'Start a journey to enable live location and available safety checks.'}</Text><View style={styles.monitorTags}><Text style={styles.monitorTag}>VOICE CUES</Text><Text style={styles.monitorTag}>{triggerPhrases.length} PHRASES</Text><Text style={styles.monitorTag}>LOCATION</Text></View></View>
 
             <LiveLocationMap point={point} trail={trail} active={active} route={routeWaypoints} />
             <Text style={[styles.mapLocationStatus, point && isLocationStale(point.timestamp, clock) && { color: colors.red }]}>{point ? `${point.latitude.toFixed(5)}, ${point.longitude.toFixed(5)} · ${isLocationStale(point.timestamp, clock) ? 'STALE · ' : ''}${new Date(point.timestamp).toLocaleTimeString()}` : locationLabel}</Text>
@@ -574,7 +653,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
             </View>
 
             <TouchableOpacity style={[styles.primaryButton, active && styles.stopButton]} onPress={active ? stopJourney : startJourney}>
-              <Text style={styles.primaryButtonText}>{active ? 'End safety journey' : 'Start a safety journey'}</Text><Text style={styles.buttonArrow}>{active ? '×' : '→'}</Text>
+              <Text style={styles.primaryButtonText}>{active ? (emergencyMode ? 'Emergency must be resolved first' : 'End safety journey') : 'Start a safety journey'}</Text><Text style={styles.buttonArrow}>{active ? '×' : '→'}</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.sosButton} onPress={triggerEmergency}><Text style={styles.sosIcon}>!</Text><View style={styles.sosCopy}><Text style={styles.sosTitle}>Send an SOS now</Text><Text style={styles.sosSub}>Email alerts go to contacts with a saved email address</Text></View><Text style={styles.sosArrow}>→</Text></TouchableOpacity>
             <Text style={styles.privacyNote}>Voice phrase recognition and motion checks run during an active journey when device permissions and recognition services allow. Continuous background monitoring still depends on native OS behavior and is not yet validated.</Text>
@@ -625,7 +704,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
                 { text: 'Cancel', style: 'cancel' },
                 { text: 'Sign out', style: 'destructive', onPress: () => void (async () => {
                   try {
-                    if (active) await stopJourney();
+                    if (active && !(await stopJourney())) return;
                     const { error } = await supabase?.auth.signOut({ scope: 'local' }) ?? { error: null };
                     if (error) throw error;
                     router.replace('/login');
@@ -668,18 +747,21 @@ function TabButton({ label, icon, selected, onPress }: { label: string; icon: st
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.navy },
-  header: { paddingHorizontal: 23, paddingTop: 10, paddingBottom: 17, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: colors.line },
+  header: { paddingHorizontal: 22, paddingTop: 8, paddingBottom: 13, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: colors.line },
+  safetyNotice: { backgroundColor: '#FBEDEF', minHeight: 27, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, paddingHorizontal: 10 }, safetyNoticeDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.red }, safetyNoticeText: { color: '#A82731', fontSize: 8, fontWeight: '800', letterSpacing: 0.7 },
   brand: { color: colors.ink, fontSize: 15, letterSpacing: 2.4, fontWeight: '800' }, brandDot: { color: colors.teal, fontSize: 10 },
   headerSub: { color: colors.muted, fontSize: 11, marginTop: 4 }, avatar: { height: 36, width: 36, borderRadius: 18, backgroundColor: colors.panel2, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.line }, avatarText: { color: colors.teal, fontWeight: '700' },
-  content: { padding: 23, paddingBottom: 36 }, eyebrowRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 7 }, eyebrow: { color: colors.teal, letterSpacing: 1.7, fontSize: 10, fontWeight: '800', marginTop: 10 }, pilot: { borderColor: '#47627A', borderWidth: 1, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 20 }, pilotText: { color: colors.muted, fontSize: 8, letterSpacing: 1.2, fontWeight: '700' },
-  title: { color: colors.ink, fontSize: 34, lineHeight: 39, letterSpacing: -0.7, fontWeight: '700', marginTop: 16 }, subtitle: { color: colors.muted, fontSize: 14, lineHeight: 21, marginTop: 10, marginBottom: 22 },
-  mapCard: { height: 234, borderRadius: 18, backgroundColor: '#172A3D', overflow: 'hidden', borderWidth: 1, borderColor: '#29435A', padding: 15, justifyContent: 'space-between' }, mapGrid: { ...StyleSheet.absoluteFill, opacity: 0.4, backgroundColor: '#183046' }, mapRoadA: { position: 'absolute', height: 17, width: 340, backgroundColor: '#203A50', top: 118, left: -55, transform: [{ rotate: '-22deg' }] }, mapRoadB: { position: 'absolute', height: 12, width: 330, backgroundColor: '#203A50', top: 130, right: -150, transform: [{ rotate: '54deg' }] }, mapRoute: { position: 'absolute', height: 3, width: 175, backgroundColor: colors.teal, top: 123, left: 88, transform: [{ rotate: '-36deg' }], borderRadius: 4 }, mapTop: { flexDirection: 'row', alignItems: 'center', zIndex: 1 }, pulse: { height: 7, width: 7, borderRadius: 4, backgroundColor: colors.muted, marginRight: 7 }, pulseActive: { backgroundColor: colors.teal }, mapLive: { color: colors.ink, fontSize: 9, letterSpacing: 1.3, fontWeight: '800', flex: 1 }, mapTime: { color: colors.muted, fontSize: 9, letterSpacing: 1.2 }, mapPin: { position: 'absolute', top: 91, left: '55%', width: 34, height: 34, borderRadius: 18, borderWidth: 7, borderColor: '#76E7CD55', backgroundColor: colors.teal, alignItems: 'center', justifyContent: 'center', zIndex: 2 }, pinText: { color: '#0B2C32', fontSize: 10 }, mapCallout: { position: 'absolute', top: 52, left: 15, backgroundColor: '#112235', padding: 10, borderRadius: 10, zIndex: 2, borderWidth: 1, borderColor: colors.line }, calloutTitle: { color: colors.ink, fontSize: 10, fontWeight: '700' }, calloutText: { color: colors.muted, fontSize: 9, marginTop: 4 }, mapFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', zIndex: 1 }, coord: { color: '#B8C9D6', fontSize: 9, letterSpacing: 1.2 }, mapArrow: { color: colors.teal, fontSize: 18 },
+  content: { padding: 21, paddingBottom: 36 }, eyebrowRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 7 }, eyebrow: { color: colors.red, letterSpacing: 1.5, fontSize: 9, fontWeight: '800', marginTop: 10 }, pilot: { borderColor: colors.line, backgroundColor: colors.panel, borderWidth: 1, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 20 }, pilotText: { color: colors.muted, fontSize: 8, letterSpacing: 1.2, fontWeight: '700' },
+  title: { color: colors.ink, fontSize: 34, lineHeight: 37, letterSpacing: -1.1, fontWeight: '800', marginTop: 15 }, subtitle: { color: colors.muted, fontSize: 13, lineHeight: 20, marginTop: 9, marginBottom: 18 },
+  monitorCard: { backgroundColor: '#151515', padding: 16, borderRadius: 15, marginBottom: 14 }, monitorTop: { flexDirection: 'row', alignItems: 'center', gap: 8 }, monitorHeading: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' }, monitorBody: { color: '#D1D1D1', fontSize: 11, lineHeight: 16, marginTop: 8 }, monitorTags: { flexDirection: 'row', gap: 7, marginTop: 13, flexWrap: 'wrap' }, monitorTag: { color: '#FFFFFF', backgroundColor: '#303030', borderRadius: 12, overflow: 'hidden', fontSize: 8, letterSpacing: 0.6, fontWeight: '800', paddingHorizontal: 8, paddingVertical: 5 },
+  mapCard: { height: 234, borderRadius: 18, backgroundColor: '#E9E9E7', overflow: 'hidden', borderWidth: 1, borderColor: colors.line, padding: 15, justifyContent: 'space-between' }, mapGrid: { ...StyleSheet.absoluteFill, opacity: 0.4, backgroundColor: '#E9E9E7' }, mapRoadA: { position: 'absolute', height: 17, width: 340, backgroundColor: '#D9D9D6', top: 118, left: -55, transform: [{ rotate: '-22deg' }] }, mapRoadB: { position: 'absolute', height: 12, width: 330, backgroundColor: '#D9D9D6', top: 130, right: -150, transform: [{ rotate: '54deg' }] }, mapRoute: { position: 'absolute', height: 3, width: 175, backgroundColor: colors.teal, top: 123, left: 88, transform: [{ rotate: '-36deg' }], borderRadius: 4 }, mapTop: { flexDirection: 'row', alignItems: 'center', zIndex: 1 }, pulse: { height: 7, width: 7, borderRadius: 4, backgroundColor: colors.muted, marginRight: 7 }, pulseActive: { backgroundColor: colors.teal }, mapLive: { color: colors.ink, fontSize: 9, letterSpacing: 1.3, fontWeight: '800', flex: 1 }, mapTime: { color: colors.muted, fontSize: 9, letterSpacing: 1.2 }, mapPin: { position: 'absolute', top: 91, left: '55%', width: 34, height: 34, borderRadius: 18, borderWidth: 7, borderColor: '#D52B3740', backgroundColor: colors.teal, alignItems: 'center', justifyContent: 'center', zIndex: 2 }, pinText: { color: '#FFFFFF', fontSize: 10 }, mapCallout: { position: 'absolute', top: 52, left: 15, backgroundColor: '#FFFFFF', padding: 10, borderRadius: 10, zIndex: 2, borderWidth: 1, borderColor: colors.line }, calloutTitle: { color: colors.ink, fontSize: 10, fontWeight: '700' }, calloutText: { color: colors.muted, fontSize: 9, marginTop: 4 }, mapFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', zIndex: 1 }, coord: { color: colors.muted, fontSize: 9, letterSpacing: 1.2 }, mapArrow: { color: colors.teal, fontSize: 18 },
   mapLocationStatus: { color: colors.muted, fontSize: 10, textAlign: 'center', marginTop: 8, marginBottom: 8 },
-  statusRow: { flexDirection: 'row', gap: 8, marginTop: 13, marginBottom: 15 }, pill: { backgroundColor: colors.panel, borderRadius: 30, paddingHorizontal: 11, paddingVertical: 8, flexDirection: 'row', alignItems: 'center' }, pillDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.muted, marginRight: 7 }, pillDotOn: { backgroundColor: colors.teal }, pillText: { color: '#CFD8E3', fontSize: 10 },
+  statusRow: { flexDirection: 'row', gap: 8, marginTop: 13, marginBottom: 15 }, pill: { backgroundColor: colors.panel, borderRadius: 30, paddingHorizontal: 11, paddingVertical: 8, flexDirection: 'row', alignItems: 'center' }, pillDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.muted, marginRight: 7 }, pillDotOn: { backgroundColor: colors.teal }, pillText: { color: colors.ink, fontSize: 10 },
   inputCard: { padding: 16, backgroundColor: colors.panel, borderRadius: 15, borderWidth: 1, borderColor: colors.line, marginTop: 10 }, cardLabel: { color: colors.muted, fontSize: 9, letterSpacing: 1.35, fontWeight: '800', marginBottom: 10 }, input: { color: colors.ink, fontSize: 14, paddingVertical: 6 }, triggerDisplay: { color: colors.ink, fontSize: 14, fontWeight: '600' }, divider: { height: 1, backgroundColor: colors.line, marginVertical: 13 },
-  primaryButton: { marginTop: 16, backgroundColor: colors.teal, borderRadius: 13, height: 54, paddingHorizontal: 17, alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' }, stopButton: { backgroundColor: colors.panel2, borderWidth: 1, borderColor: colors.red }, primaryButtonText: { color: '#0D2630', fontWeight: '800', fontSize: 14 }, buttonArrow: { color: '#0D2630', fontSize: 23, fontWeight: '400' },
-  sosButton: { marginTop: 11, borderRadius: 13, borderWidth: 1, borderColor: '#714047', backgroundColor: '#38252F', paddingHorizontal: 14, height: 64, flexDirection: 'row', alignItems: 'center' }, sosIcon: { color: colors.red, borderColor: '#A8565F', borderWidth: 1, borderRadius: 20, height: 30, width: 30, textAlign: 'center', textAlignVertical: 'center', overflow: 'hidden', fontSize: 16, fontWeight: '700', marginRight: 12 }, sosCopy: { flex: 1 }, sosTitle: { color: colors.ink, fontSize: 12, fontWeight: '700' }, sosSub: { color: '#C88C91', fontSize: 9, marginTop: 4 }, sosArrow: { color: colors.red, fontSize: 20 }, privacyNote: { color: '#7F90A4', textAlign: 'center', fontSize: 10, lineHeight: 15, marginTop: 15, paddingHorizontal: 6 },
-  emptyText: { color: colors.muted, fontSize: 13, lineHeight: 20 }, contactRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomColor: colors.line, borderBottomWidth: 1 }, contactAvatar: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#204B56', alignItems: 'center', justifyContent: 'center', marginRight: 10 }, contactInitial: { color: colors.teal, fontWeight: '800' }, contactName: { color: colors.ink, fontWeight: '700', fontSize: 13 }, contactPhone: { color: colors.muted, fontSize: 11, marginTop: 3 }, shareLink: { color: colors.teal, fontSize: 10, fontWeight: '700', marginTop: 7 }, remove: { color: colors.muted, fontSize: 22, paddingHorizontal: 5 }, secondaryButton: { marginTop: 10, padding: 14, alignItems: 'center' }, secondaryText: { color: colors.teal, fontWeight: '700', fontSize: 12 }, helper: { color: colors.muted, lineHeight: 18, fontSize: 11, marginTop: 7 }, noticeCard: { backgroundColor: '#1D3042', borderWidth: 1, borderColor: '#31556A', borderRadius: 14, marginTop: 14, padding: 14, flexDirection: 'row' }, noticeIcon: { color: colors.teal, fontSize: 17, marginRight: 11 }, noticeTitle: { color: colors.ink, fontSize: 12, fontWeight: '700' }, noticeBody: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 4 },
-  footer: { textAlign: 'center', color: '#63758B', fontSize: 8, letterSpacing: 1.6, marginTop: 29 }, tabBar: { height: 67, backgroundColor: '#132136', borderTopWidth: 1, borderTopColor: colors.line, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around' }, tabButton: { width: '25%', alignItems: 'center', justifyContent: 'center' }, tabIcon: { color: colors.muted, fontSize: 19 }, tabLabel: { color: colors.muted, fontSize: 9, marginTop: 2 }, tabSelected: { color: colors.teal },
+  primaryButton: { marginTop: 16, backgroundColor: colors.teal, borderRadius: 13, height: 54, paddingHorizontal: 17, alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' }, stopButton: { backgroundColor: colors.panel2, borderWidth: 1, borderColor: colors.red }, primaryButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14 }, buttonArrow: { color: '#FFFFFF', fontSize: 23, fontWeight: '400' },
+  sosButton: { marginTop: 11, borderRadius: 13, borderWidth: 1, borderColor: '#EDB7BC', backgroundColor: '#FCEEEF', paddingHorizontal: 14, height: 64, flexDirection: 'row', alignItems: 'center' }, sosIcon: { color: colors.red, borderColor: '#E8A2A8', borderWidth: 1, borderRadius: 20, height: 30, width: 30, textAlign: 'center', textAlignVertical: 'center', overflow: 'hidden', fontSize: 16, fontWeight: '700', marginRight: 12 }, sosCopy: { flex: 1 }, sosTitle: { color: colors.ink, fontSize: 12, fontWeight: '700' }, sosSub: { color: '#A54D55', fontSize: 9, marginTop: 4 }, sosArrow: { color: colors.red, fontSize: 20 }, privacyNote: { color: colors.muted, textAlign: 'center', fontSize: 10, lineHeight: 15, marginTop: 15, paddingHorizontal: 6 },
+  emergencyCard: { backgroundColor: '#FCEEEF', borderRadius: 14, borderWidth: 1, borderColor: '#EDB7BC', padding: 15, marginBottom: 15 }, emergencyHeading: { color: colors.red, fontSize: 12, letterSpacing: 0.7, fontWeight: '900' }, emergencyBody: { color: colors.ink, fontSize: 12, lineHeight: 18, marginTop: 7 }, resolveButton: { backgroundColor: colors.red, borderRadius: 10, paddingHorizontal: 13, paddingVertical: 12, alignItems: 'center', marginTop: 12 }, resolveButtonDisabled: { opacity: 0.55 }, resolveButtonText: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
+  emptyText: { color: colors.muted, fontSize: 13, lineHeight: 20 }, contactRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomColor: colors.line, borderBottomWidth: 1 }, contactAvatar: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#FBEDEF', alignItems: 'center', justifyContent: 'center', marginRight: 10 }, contactInitial: { color: colors.teal, fontWeight: '800' }, contactName: { color: colors.ink, fontWeight: '700', fontSize: 13 }, contactPhone: { color: colors.muted, fontSize: 11, marginTop: 3 }, shareLink: { color: colors.teal, fontSize: 10, fontWeight: '700', marginTop: 7 }, remove: { color: colors.muted, fontSize: 22, paddingHorizontal: 5 }, secondaryButton: { marginTop: 10, padding: 14, alignItems: 'center' }, secondaryText: { color: colors.teal, fontWeight: '700', fontSize: 12 }, helper: { color: colors.muted, lineHeight: 18, fontSize: 11, marginTop: 7 }, noticeCard: { backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line, borderRadius: 14, marginTop: 14, padding: 14, flexDirection: 'row' }, noticeIcon: { color: colors.teal, fontSize: 17, marginRight: 11 }, noticeTitle: { color: colors.ink, fontSize: 12, fontWeight: '700' }, noticeBody: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 4 },
+  footer: { textAlign: 'center', color: colors.muted, fontSize: 8, letterSpacing: 1.6, marginTop: 29 }, tabBar: { height: 67, backgroundColor: '#FFFFFF', borderTopWidth: 1, borderTopColor: colors.line, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around' }, tabButton: { width: '25%', alignItems: 'center', justifyContent: 'center' }, tabIcon: { color: colors.muted, fontSize: 19 }, tabLabel: { color: colors.muted, fontSize: 9, marginTop: 2 }, tabSelected: { color: colors.red },
 });
 

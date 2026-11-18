@@ -5,6 +5,7 @@ import CompanionMonitor from '../../modules/companion-monitor';
 import { LOCATION_TASK, SESSION_KEY } from './backgroundLocation';
 import { ACTIVE_JOURNEY_KEY } from './journeys';
 import { saveTriggerPhrases } from './triggerPhrases';
+import { clearLocalEmergencyEvidence } from './evidence';
 
 export type TrustedContact = { name: string; phone?: string; email?: string };
 
@@ -42,5 +43,6 @@ export async function deleteAccount() {
       'companion-background-audio-enabled', 'companion-emergency-audio-evidence-v1',
     ]),
     saveTriggerPhrases([]),
+    clearLocalEmergencyEvidence(),
   ]);
 }
