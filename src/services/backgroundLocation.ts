@@ -1,8 +1,8 @@
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { publishLocation } from './journeys';
-import { isRouteDeviation, parseRouteCoordinates, type Coordinate } from './routeSafety';
+import { publishLatestLocation } from './locationPublishing';
+import { isRouteDeviation, parseRouteCoordinates, shouldAcceptLocationUpdate, type Coordinate, type TimestampedLocation } from './routeSafety';
 import { reportRouteDeviation } from './sharing';
 
 export const LOCATION_TASK = 'companion-background-location';
@@ -12,6 +12,7 @@ export const ACTIVE_ROUTE_KEY = 'companion-active-route';
 export const ROUTE_ORIGIN_KEY = 'companion-route-origin';
 export const ROUTE_DEVIATION_COUNT_KEY = 'companion-route-deviation-count';
 export const LAST_ROUTE_ALERT_KEY = 'companion-last-route-alert';
+export const ROUTE_DEVIATION_THRESHOLD_KEY = 'companion-route-deviation-threshold-m';
 
 TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
   if (error || !data) return;
@@ -22,17 +23,22 @@ TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
   const point = {
     latitude: latest.coords.latitude,
     longitude: latest.coords.longitude,
-    accuracy: latest.coords.accuracy ?? null,
+    accuracy: latest.coords.accuracy,
     timestamp: latest.timestamp,
   };
-  await AsyncStorage.setItem(LAST_LOCATION_KEY, JSON.stringify(point));
+  if (typeof point.accuracy !== 'number' || !Number.isFinite(point.accuracy)) return;
+  const validPoint: TimestampedLocation = { ...point, accuracy: point.accuracy };
+  const storedPoint = await AsyncStorage.getItem(LAST_LOCATION_KEY);
+  let previous: TimestampedLocation | null = null;
+  if (storedPoint) {
+    try { previous = JSON.parse(storedPoint) as TimestampedLocation; }
+    catch { previous = null; }
+  }
+  if (!shouldAcceptLocationUpdate(validPoint, previous, { maxAccuracyMeters: 100, now: Date.now(), maxAgeMs: 30_000 })) return;
+  await AsyncStorage.setItem(LAST_LOCATION_KEY, JSON.stringify(validPoint));
   const journeyId = await AsyncStorage.getItem('companion-active-journey-id');
   if (journeyId) {
-    try {
-      await publishLocation(journeyId, point);
-    } catch {
-      // Keep the last device location saved if the network is unavailable; the UI can show its age.
-    }
+    await publishLatestLocation(journeyId, validPoint);
 
     try {
       const savedRoute = await AsyncStorage.getItem(ACTIVE_ROUTE_KEY);
@@ -46,8 +52,12 @@ TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
             origin = { latitude: point.latitude, longitude: point.longitude };
             await AsyncStorage.setItem(ROUTE_ORIGIN_KEY, JSON.stringify(origin));
           }
-          const result = isRouteDeviation(point, [origin, ...route], {
-            thresholdMeters: 100,
+          const configuredThreshold = Number(await AsyncStorage.getItem(ROUTE_DEVIATION_THRESHOLD_KEY));
+          const thresholdMeters = Number.isFinite(configuredThreshold) && configuredThreshold >= 50 && configuredThreshold <= 500
+            ? configuredThreshold
+            : 100;
+          const result = isRouteDeviation(validPoint, [origin, ...route], {
+            thresholdMeters,
             accuracyMeters: latest.coords.accuracy ?? 0,
           });
           const count = result.deviated
@@ -59,7 +69,7 @@ TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
             if (Date.now() - lastAlert > 5 * 60_000) {
               await AsyncStorage.setItem(LAST_ROUTE_ALERT_KEY, String(Date.now()));
               await AsyncStorage.setItem(ROUTE_DEVIATION_COUNT_KEY, '0');
-              await reportRouteDeviation(journeyId, point, Math.round(result.distanceMeters));
+              await reportRouteDeviation(journeyId, validPoint, Math.round(result.distanceMeters));
             }
           }
         }

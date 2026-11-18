@@ -46,11 +46,13 @@ class CompanionMonitorService : Service(), SensorEventListener {
   private var lastSignalAt = 0L
   private var screamThreshold = 0.82f
   private var emergencyRetryAttempts = 0
+  @Volatile private var audioRetryAttempts = 0
   private var pendingEmergencyReason = ""
   private var checkInRunnable: Runnable? = null
   private val emergencyRetryDelays = longArrayOf(2_000, 5_000, 15_000, 30_000, 60_000, 120_000)
   @Volatile private var monitoring = false
   @Volatile private var audioMonitoring = false
+  @Volatile private var motionMonitoring = true
   @Volatile private var emergencySent = false
   private var journeyId = ""
 
@@ -59,8 +61,6 @@ class CompanionMonitorService : Service(), SensorEventListener {
     ensureChannel()
     startForeground(NOTIFICATION_ID, monitoringNotification())
     sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
-    val accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-    accelerometer?.let { sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -87,11 +87,18 @@ class CompanionMonitorService : Service(), SensorEventListener {
       ACTION_SET_AUDIO -> {
         val enabled = intent.getBooleanExtra(EXTRA_AUDIO_ENABLED, false)
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("backgroundAudioEnabled", enabled).apply()
-        if (enabled && monitoring && !audioMonitoring) startAudioMonitor()
+        if (enabled && monitoring && !audioMonitoring) { audioRetryAttempts = 0; startAudioMonitor() }
         else {
           if (!enabled) stopAudioCapture()
           if (monitoring) startForeground(NOTIFICATION_ID, monitoringNotification())
         }
+        return START_STICKY
+      }
+      ACTION_SET_MOTION -> {
+        val enabled = intent.getBooleanExtra(EXTRA_MOTION_ENABLED, true)
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("motionMonitoringEnabled", enabled).apply()
+        configureMotionMonitoring(enabled)
+        if (monitoring) startForeground(NOTIFICATION_ID, monitoringNotification())
         return START_STICKY
       }
       ACTION_START -> {
@@ -105,13 +112,16 @@ class CompanionMonitorService : Service(), SensorEventListener {
         intent.getStringExtra(EXTRA_ACCESS_TOKEN)?.takeIf { it.isNotBlank() }?.let { editor.putString("accessToken", SecretBox.encrypt(this, it)) }
         intent.getStringExtra(EXTRA_REFRESH_TOKEN)?.takeIf { it.isNotBlank() }?.let { editor.putString("refreshToken", SecretBox.encrypt(this, it)) }
         val audioEnabled = intent.getBooleanExtra(EXTRA_AUDIO_ENABLED, false)
-        editor.putBoolean("running", true).putBoolean("backgroundAudioEnabled", audioEnabled).apply()
+        motionMonitoring = intent.getBooleanExtra(EXTRA_MOTION_ENABLED, prefs.getBoolean("motionMonitoringEnabled", true))
+        editor.putBoolean("running", true).putBoolean("backgroundAudioEnabled", audioEnabled)
+          .putBoolean("motionMonitoringEnabled", motionMonitoring).apply()
         screamThreshold = intent.getFloatExtra(EXTRA_SCREAM_THRESHOLD, 0.82f).coerceIn(0.5f, 0.99f)
         if (prefs.getBoolean("emergencyActive", false)) {
           val reason = prefs.getString("pendingEmergencyReason", null)
           val pendingJourneyId = prefs.getString("pendingEmergencyJourneyId", journeyId)
           emergencySent = true
           monitoring = false
+          configureMotionMonitoring(false)
           startForeground(NOTIFICATION_ID, monitoringNotification())
           if (prefs.getBoolean("emergencyPending", false) && !reason.isNullOrBlank() && !pendingJourneyId.isNullOrBlank()) {
             emergencyRetryAttempts = prefs.getInt("emergencyRetryAttempts", 0)
@@ -121,6 +131,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
           return START_STICKY
         }
         monitoring = true
+        configureMotionMonitoring(motionMonitoring)
         if (audioEnabled && !audioMonitoring) startAudioMonitor()
         else {
           if (!audioEnabled) stopAudioCapture()
@@ -147,6 +158,8 @@ class CompanionMonitorService : Service(), SensorEventListener {
         journeyId = prefs.getString("journeyId", "").orEmpty()
         if (prefs.getBoolean("running", false) && journeyId.isNotBlank()) {
           monitoring = true
+          motionMonitoring = prefs.getBoolean("motionMonitoringEnabled", true)
+          configureMotionMonitoring(motionMonitoring)
           if (!audioMonitoring && MonitorRecoveryPolicy.shouldStartBackgroundAudio(
               prefs.getBoolean("backgroundAudioEnabled", false), hasMicrophonePermission(),
             )) startAudioMonitor()
@@ -181,7 +194,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
       return
     }
     audioMonitoring = true
-    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("running", true).apply()
+    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("running", true).putBoolean("audioMonitoringActive", true).apply()
     startForeground(NOTIFICATION_ID, monitoringNotification())
     audioThread.execute {
       try {
@@ -214,8 +227,10 @@ class CompanionMonitorService : Service(), SensorEventListener {
         publishStatus("Microphone access was denied. Background voice monitoring is off.")
       } catch (error: Exception) {
         publishStatus("Voice model unavailable: ${error.message ?: "initialization failed"}")
+        scheduleAudioRetry()
       } finally {
         audioMonitoring = false
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("audioMonitoringActive", false).apply()
         try { audioRecord?.stop() } catch (_: Exception) { }
         audioRecord?.release()
         audioRecord = null
@@ -231,12 +246,12 @@ class CompanionMonitorService : Service(), SensorEventListener {
     val inputElements = inputTensor.shape().fold(1) { acc, value -> acc * value }
     if (inputElements != samples.size) {
       publishStatus("YAMNet input shape ${inputTensor.shape().contentToString()} does not match the 16 kHz audio window.")
-      monitoring = false
+      audioMonitoring = false
       return
     }
     val outputTensor = interpreter?.getOutputTensor(0) ?: return
     val outputSize = outputTensor.shape().fold(1) { acc, value -> acc * value }
-    if (outputSize < 12) { monitoring = false; publishStatus("The distress model output does not contain AudioSet labels."); return }
+    if (outputSize < 12) { audioMonitoring = false; publishStatus("The distress model output does not contain AudioSet labels."); return }
     val input = Array(1) { FloatArray(samples.size) }
     for (i in samples.indices) input[0][i] = samples[i] / 32768f
     val output = Array(1) { FloatArray(outputSize) }
@@ -257,12 +272,13 @@ class CompanionMonitorService : Service(), SensorEventListener {
       }
     } catch (error: Exception) {
       publishStatus("Distress sound inference failed: ${error.message ?: "model error"}")
-      monitoring = false
+      scheduleAudioRetry()
+      audioMonitoring = false
     }
   }
 
   override fun onSensorChanged(event: SensorEvent) {
-    if (!monitoring || event.sensor.type != Sensor.TYPE_ACCELEROMETER) return
+    if (!monitoring || !motionMonitoring || event.sensor.type != Sensor.TYPE_ACCELEROMETER) return
     val now = System.currentTimeMillis()
     val confidence = fallDetector.onAcceleration(event.values[0], event.values[1], event.values[2], now)
     if (confidence != null) {
@@ -342,6 +358,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
     fallDetector.reset()
     emergencySent = false
     handler.removeCallbacksAndMessages(null)
+    CompanionMonitorBridge.emitCheckInResolved(System.currentTimeMillis())
     showAlertNotification("Safety check confirmed", "Background monitoring continues during this journey.", safeAction = false)
   }
 
@@ -362,7 +379,9 @@ class CompanionMonitorService : Service(), SensorEventListener {
       .remove("pendingEmergencyJourneyId")
       .remove("emergencyRetryAttempts")
       .apply()
-    monitoring = journeyId.isNotBlank()
+    monitoring = journeyId.isNotBlank() && prefs.getBoolean("running", true)
+    motionMonitoring = prefs.getBoolean("motionMonitoringEnabled", true)
+    configureMotionMonitoring(motionMonitoring)
     if (monitoring && prefs.getBoolean("backgroundAudioEnabled", false) && hasMicrophonePermission()) startAudioMonitor()
     else startForeground(NOTIFICATION_ID, monitoringNotification())
     showAlertNotification("Emergency resolved", "The emergency is marked resolved. Monitoring continues while this journey remains active.", safeAction = false)
@@ -490,11 +509,35 @@ class CompanionMonitorService : Service(), SensorEventListener {
 
   private fun stopAudioCapture() {
     audioMonitoring = false
+    audioRetryAttempts = 0
+    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("audioMonitoringActive", false).apply()
     try { audioRecord?.stop() } catch (_: Exception) { }
   }
 
   private fun hasMicrophonePermission() =
     checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+  private fun scheduleAudioRetry() {
+    val delays = longArrayOf(2_000, 5_000, 15_000)
+    if (!monitoring || audioRetryAttempts >= delays.size) return
+    val delay = delays[audioRetryAttempts++]
+    handler.postDelayed({
+      val preferences = getSharedPreferences(PREFS, MODE_PRIVATE)
+      if (monitoring && preferences.getBoolean("backgroundAudioEnabled", false) && hasMicrophonePermission() && !audioMonitoring) {
+        startAudioMonitor()
+      }
+    }, delay)
+  }
+
+  private fun configureMotionMonitoring(enabled: Boolean) {
+    motionMonitoring = enabled
+    val accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+    if (enabled && monitoring && accelerometer != null) {
+      sensorManager?.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_GAME)
+    } else {
+      sensorManager?.unregisterListener(this)
+    }
+  }
 
   private fun publishStatus(message: String) {
     getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("status", message).apply()
@@ -513,7 +556,12 @@ class CompanionMonitorService : Service(), SensorEventListener {
   private fun monitoringNotification(): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
     .setSmallIcon(android.R.drawable.ic_lock_lock)
     .setContentTitle("Companion safety monitoring active")
-    .setContentText(if (audioMonitoring) "On-device audio and motion checks are running for this journey." else "Native motion checks are on; background audio monitoring is off.")
+    .setContentText(when {
+      audioMonitoring && motionMonitoring -> "On-device sound and motion checks are running for this journey."
+      audioMonitoring -> "On-device sound checks are running; motion checks are off."
+      motionMonitoring -> "Native motion checks are on; background audio monitoring is off."
+      else -> "Safety location tracking is active; sound and motion checks are off."
+    })
     .setOngoing(true)
     .setCategory(NotificationCompat.CATEGORY_SERVICE)
     .build()
@@ -547,6 +595,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
     const val ACTION_RESOLVE_EMERGENCY = "expo.modules.companionmonitor.RESOLVE_EMERGENCY"
     const val ACTION_CONFIRM_SAFE = "expo.modules.companionmonitor.CONFIRM_SAFE"
     const val ACTION_SET_AUDIO = "expo.modules.companionmonitor.SET_AUDIO"
+    const val ACTION_SET_MOTION = "expo.modules.companionmonitor.SET_MOTION"
     const val EXTRA_JOURNEY_ID = "journeyId"
     const val EXTRA_SUPABASE_URL = "supabaseUrl"
     const val EXTRA_PUBLISHABLE_KEY = "publishableKey"
@@ -554,6 +603,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
     const val EXTRA_REFRESH_TOKEN = "refreshToken"
     const val EXTRA_SCREAM_THRESHOLD = "screamThreshold"
     const val EXTRA_AUDIO_ENABLED = "audioEnabled"
+    const val EXTRA_MOTION_ENABLED = "motionEnabled"
     const val EXTRA_EMERGENCY_REASON = "emergencyReason"
     private const val CHANNEL_ID = "companion-safety-monitor"
     private const val NOTIFICATION_ID = 48101

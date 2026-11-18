@@ -9,6 +9,7 @@ export type MonitorSignal = {
 
 declare class CompanionMonitorNative extends NativeModule<{
   onDistressSignal: (signal: MonitorSignal) => void;
+  onCheckInResolved: (event: { timestamp: number }) => void;
 }> {
   startMonitoring(config: {
     journeyId: string;
@@ -17,13 +18,16 @@ declare class CompanionMonitorNative extends NativeModule<{
     accessToken: string;
     refreshToken: string;
     screamThreshold?: number;
+    motionEnabled: boolean;
     audioEnabled: boolean;
   }): Promise<boolean>;
   stopMonitoring(): Promise<void>;
   triggerEmergency(reason: string): Promise<boolean>;
   resolveEmergency(): Promise<void>;
+  confirmSafe(): Promise<void>;
   setBackgroundAudioEnabled(enabled: boolean): Promise<void>;
-  getStatus(): Promise<{ running: boolean; lastSignal?: MonitorSignal | null; status?: string | null; emergencyPending?: boolean }>;
+  setMotionMonitoringEnabled(enabled: boolean): Promise<void>;
+  getStatus(): Promise<{ running: boolean; lastSignal?: MonitorSignal | null; status?: string | null; emergencyPending?: boolean; audioMonitoring?: boolean; motionMonitoring?: boolean }>;
 }
 
 export default requireOptionalNativeModule<CompanionMonitorNative>('CompanionMonitor');

@@ -9,7 +9,7 @@ import expo.modules.kotlin.modules.ModuleDefinition
 class CompanionMonitorModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("CompanionMonitor")
-    Events("onDistressSignal")
+    Events("onDistressSignal", "onCheckInResolved")
 
     OnCreate { CompanionMonitorBridge.module = this@CompanionMonitorModule }
     OnDestroy { CompanionMonitorBridge.module = null }
@@ -27,6 +27,7 @@ class CompanionMonitorModule : Module() {
         putExtra(CompanionMonitorService.EXTRA_ACCESS_TOKEN, config["accessToken"] as? String ?: "")
         putExtra(CompanionMonitorService.EXTRA_REFRESH_TOKEN, config["refreshToken"] as? String ?: "")
         putExtra(CompanionMonitorService.EXTRA_SCREAM_THRESHOLD, (config["screamThreshold"] as? Number)?.toFloat() ?: 0.82f)
+        putExtra(CompanionMonitorService.EXTRA_MOTION_ENABLED, config["motionEnabled"] as? Boolean ?: true)
         putExtra(CompanionMonitorService.EXTRA_AUDIO_ENABLED, config["audioEnabled"] as? Boolean ?: false)
       }
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
@@ -48,6 +49,14 @@ class CompanionMonitorModule : Module() {
       }
     }
 
+    AsyncFunction("setMotionMonitoringEnabled") { enabled: Boolean ->
+      appContext.reactContext?.applicationContext?.let { context ->
+        context.startService(Intent(context, CompanionMonitorService::class.java)
+          .setAction(CompanionMonitorService.ACTION_SET_MOTION)
+          .putExtra(CompanionMonitorService.EXTRA_MOTION_ENABLED, enabled))
+      }
+    }
+
     AsyncFunction("triggerEmergency") { reason: String ->
       val context = appContext.reactContext?.applicationContext
         ?: throw IllegalStateException("Application context is unavailable.")
@@ -64,6 +73,13 @@ class CompanionMonitorModule : Module() {
       }
     }
 
+    AsyncFunction("confirmSafe") {
+      appContext.reactContext?.applicationContext?.let { context ->
+        context.startService(Intent(context, CompanionMonitorService::class.java)
+          .setAction(CompanionMonitorService.ACTION_CONFIRM_SAFE))
+      }
+    }
+
     AsyncFunction("getStatus") {
       val context = appContext.reactContext?.applicationContext
         ?: throw IllegalStateException("Application context is unavailable.")
@@ -73,6 +89,8 @@ class CompanionMonitorModule : Module() {
         "lastSignal" to prefs.getString("lastSignal", null),
         "status" to prefs.getString("status", null),
         "emergencyPending" to prefs.getBoolean("emergencyPending", false),
+        "audioMonitoring" to prefs.getBoolean("audioMonitoringActive", false),
+        "motionMonitoring" to prefs.getBoolean("motionMonitoringEnabled", true),
       )
     }
   }
@@ -86,5 +104,9 @@ internal object CompanionMonitorBridge {
       "onDistressSignal",
       mapOf("kind" to kind, "confidence" to confidence.toDouble(), "timestamp" to timestamp.toDouble(), "signalId" to signalId),
     )
+  }
+
+  fun emitCheckInResolved(timestamp: Long) {
+    module?.sendEvent("onCheckInResolved", mapOf("timestamp" to timestamp.toDouble()))
   }
 }

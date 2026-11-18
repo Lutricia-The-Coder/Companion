@@ -1,6 +1,6 @@
 # Remaining setup and test steps
 
-The local implementation and final arm64 APK are ready. Complete the Dashboard steps below before connecting the Honor X5c. Do not use real emergency contacts or invoke evidence cleanup against production data during testing.
+The current source implementation is still being completed. Do not use an APK from an earlier pass for feature testing: it predates the current native service and safety-flow changes. The final arm64 APK will be built only after source work is complete, then installed on the Honor X5c for the agreed device checks. Do not use real emergency contacts or invoke evidence cleanup against production data during testing.
 
 ## 1. Deploy the three updated Supabase functions
 
@@ -47,6 +47,8 @@ where routine_schema = 'public' and routine_name = 'resolve_emergency';
 
 The expected result is one row. Do not run the SQL more than once unless it reports an error; its statements are safe to reapply, but a successful result is enough.
 
+Also apply `supabase/migrations/202611180002_monotonic_journey_location.sql` in the same SQL Editor session. It updates the existing owner-only location RPC to ignore duplicate or older GPS timestamps and rejects fixes with accuracy over 100 meters, preventing delayed writes from moving the dashboard backward. This is a production schema change: review the SQL first and apply it only when you are ready. Verify the function was replaced by checking that the latest published location keeps the greatest timestamp during the final two-account device test.
+
 ## 5. Verify the evidence cleanup schedule
 
 The user reports that Vault secrets are saved and job ID 1 is scheduled for 02:30 UTC. After that scheduled time, run this read-only query in SQL Editor:
@@ -88,6 +90,6 @@ It reports precision, recall, false negatives and false positives per background
 
 ## 8. Install and test on the Honor X5c — last
 
-The current APK is already built at `android/app/build/outputs/apk/debug/app-debug.apk` for `arm64-v8a`. No device was connected when ADB was checked. When you are ready, connect the Honor by USB, enable Developer options → **USB debugging**, accept the authorization prompt, then tell me. I’ll verify ADB sees the phone, install this APK, and guide the tests together.
+After the final source pass, build the APK at `android/app/build/outputs/apk/debug/app-debug.apk` for the Honor X5c's `arm64-v8a` architecture. Until that final build completes, any existing APK at that path is stale and must not be used to judge current source behavior. When we reach this step, connect the Honor by USB, enable Developer options → **USB debugging**, and accept the authorization prompt; then verify ADB sees the phone, install the newly built APK, and guide the tests together.
 
 Do not test simulated screams/falls around other people or with real contacts configured. We’ll first verify launch, permissions, journey start/stop, live GPS, and notification status; then test check-in/resolution, evidence and background behavior with the disposable accounts.

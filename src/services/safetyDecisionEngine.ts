@@ -19,6 +19,8 @@ export type SafetySignalKind =
 export type SafetySignal = {
   kind: SafetySignalKind;
   confidence: number;
+  /** False means the recognizer did not provide a score; this is not a zero-confidence result. */
+  confidenceAvailable?: boolean;
   timestamp: number;
   exactPhraseMatch?: boolean;
   independentActivation?: boolean;
@@ -42,7 +44,8 @@ export type SafetyEngineAction =
 
 export const DEFAULT_SAFETY_POLICY: SafetyEnginePolicy = {
   independentPhraseEnabled: true,
-  phraseConfidence: 0.9,
+  // ASR scores are provider-specific and uncalibrated; exact transcript match is still required.
+  phraseConfidence: 0.65,
   soundConfidence: 0.94,
   fallConfidence: 0.95,
   combinedConfidence: 1.6,
@@ -85,7 +88,8 @@ export class SafetyDecisionEngine {
     this.evidence = this.evidence.filter((item) => now >= item.timestamp && now - item.timestamp <= this.policy.evidenceWindowMs);
     this.evidence.push({ ...signal, confidence });
 
-    if (signal.kind === 'private_phrase' && signal.exactPhraseMatch && confidence >= this.policy.phraseConfidence) {
+    const phraseConfidenceAccepted = signal.confidenceAvailable === false || confidence >= this.policy.phraseConfidence;
+    if (signal.kind === 'private_phrase' && signal.exactPhraseMatch && phraseConfidenceAccepted) {
       if (signal.independentActivation ?? this.policy.independentPhraseEnabled) return this.activate('Configured personal SOS phrase matched.');
       return this.requestCheckIn(now, 'Configured SOS phrase matched; independent activation is disabled.');
     }

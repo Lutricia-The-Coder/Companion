@@ -4,8 +4,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'expo-router';
 import { DeviceMotion } from 'expo-sensors';
-import { ACTIVE_ROUTE_KEY, LAST_LOCATION_KEY, LOCATION_TASK, ROUTE_DEVIATION_COUNT_KEY, ROUTE_ORIGIN_KEY, SESSION_KEY } from './src/services/backgroundLocation';
-import { ACTIVE_JOURNEY_KEY, createJourney, finishJourney, publishLocation } from './src/services/journeys';
+import { requestRecordingPermissionsAsync } from 'expo-audio';
+import { ACTIVE_ROUTE_KEY, LAST_LOCATION_KEY, LOCATION_TASK, ROUTE_DEVIATION_COUNT_KEY, ROUTE_DEVIATION_THRESHOLD_KEY, ROUTE_ORIGIN_KEY, SESSION_KEY } from './src/services/backgroundLocation';
+import { ACTIVE_JOURNEY_KEY, createJourney, finishJourney } from './src/services/journeys';
+import { clearPendingLocationUpload, publishLatestLocation } from './src/services/locationPublishing';
 import { supabase, supabaseConfig, supabaseReady } from './src/lib/supabase';
 import { rememberJourneyId, saveTrustedContacts } from './src/services/profile';
 import { activateEmergency, grantTrustedContactAccess, resolveEmergency as resolveEmergencyEvent } from './src/services/sharing';
@@ -19,7 +21,7 @@ import NotificationPreferences from './src/components/NotificationPreferences';
 import { deleteAccount } from './src/services/profile';
 import CompanionMonitor from './modules/companion-monitor';
 import { loadTriggerPhrases, type TriggerPhrase } from './src/services/triggerPhrases';
-import { isLocationStale, isRouteDeviation, parseRouteCoordinates, type Coordinate } from './src/services/routeSafety';
+import { isLocationStale, isRouteDeviation, parseRouteCoordinates, shouldAcceptLocationUpdate, type Coordinate, type TimestampedLocation } from './src/services/routeSafety';
 import { planRoadRoute } from './src/services/roadRoutes';
 import { SafetyAgent, reportSafetySignal, setActiveSafetyAgent } from './src/services/safetyAgent';
 import { FallDetector } from './src/services/fallDetector';
@@ -28,6 +30,7 @@ import {
   AppState,
   KeyboardAvoidingView,
   Linking as NativeLinking,
+  PermissionsAndroid,
   Platform,
   SafeAreaView,
   ScrollView,
@@ -42,6 +45,7 @@ import {
 
 type Point = { latitude: number; longitude: number; accuracy: number | null; timestamp: number };
 type Contact = { name: string; phone: string; email?: string };
+const BACKGROUND_LOCATION_EMERGENCY_CADENCE_KEY = 'companion-background-location-emergency-cadence';
 
 async function sendEmergencyStatus(reason = 'Manual SOS') {
   const journeyId = await AsyncStorage.getItem(ACTIVE_JOURNEY_KEY);
@@ -72,6 +76,42 @@ async function sendEmergencyStatus(reason = 'Manual SOS') {
   }
 }
 
+async function restoreBackgroundLocationTask(emergency: boolean) {
+  if (Platform.OS === 'web') return false;
+  try {
+    const [foreground, background] = await Promise.all([
+      Location.getForegroundPermissionsAsync(),
+      Location.getBackgroundPermissionsAsync(),
+    ]);
+    const started = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK);
+    if (!foreground.granted || !background.granted) {
+      if (started) await Location.stopLocationUpdatesAsync(LOCATION_TASK);
+      await AsyncStorage.removeItem(BACKGROUND_LOCATION_EMERGENCY_CADENCE_KEY);
+      return false;
+    }
+    const configuredEmergencyCadence = await AsyncStorage.getItem(BACKGROUND_LOCATION_EMERGENCY_CADENCE_KEY);
+    if (started && configuredEmergencyCadence === String(emergency)) return true;
+    if (started) await Location.stopLocationUpdatesAsync(LOCATION_TASK);
+    await Location.startLocationUpdatesAsync(LOCATION_TASK, {
+      accuracy: Location.Accuracy.High,
+      timeInterval: emergency ? 2_000 : 5_000,
+      distanceInterval: emergency ? 1 : 5,
+      pausesUpdatesAutomatically: false,
+      foregroundService: {
+        notificationTitle: emergency ? 'Companion emergency tracking active' : 'Companion safety journey active',
+        notificationBody: emergency
+          ? 'Your emergency location is being shared with authorized contacts.'
+          : 'Your live location is being shared for this journey.',
+        killServiceOnDestroy: false,
+      },
+    });
+    await AsyncStorage.setItem(BACKGROUND_LOCATION_EMERGENCY_CADENCE_KEY, String(emergency));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const colors = {
   navy: '#F7F7F6',
   panel: '#F0F0EF',
@@ -95,19 +135,29 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
   const [journeyId, setJourneyId] = useState<string | null>(null);
   const [evidenceConsent, setEvidenceConsent] = useState(false);
   const [backgroundAudioAllowed, setBackgroundAudioAllowed] = useState(true);
+  const [motionMonitoringAllowed, setMotionMonitoringAllowed] = useState(true);
+  const [phraseMonitoringAllowed, setPhraseMonitoringAllowed] = useState(true);
+  const [shareEachJourney, setShareEachJourney] = useState(false);
   const [evidenceStatus, setEvidenceStatus] = useState('Audio evidence is off');
   const [trigger, setTrigger] = useState('');
   const [triggerPhrases, setTriggerPhrases] = useState<TriggerPhrase[]>([]);
   const [voiceStatus, setVoiceStatus] = useState('Voice monitoring is paused');
+  const [pendingCheckIn, setPendingCheckIn] = useState<{ reason: string; deadline: number } | null>(null);
+  const [checkInSeconds, setCheckInSeconds] = useState(0);
+  const [nativeMonitorStatus, setNativeMonitorStatus] = useState('');
+  const [notificationPermissionStatus, setNotificationPermissionStatus] = useState('');
+  const [speechRetryToken, setSpeechRetryToken] = useState(0);
   const [destination, setDestination] = useState('');
   const [routeWaypoints, setRouteWaypoints] = useState<Coordinate[]>([]);
   const [routeWaypointText, setRouteWaypointText] = useState('');
   const [routeStatus, setRouteStatus] = useState('No route check configured');
+  const [routeDeviationThreshold, setRouteDeviationThreshold] = useState(100);
   const [contactName, setContactName] = useState('');
   const [contactPhone, setContactPhone] = useState('');
   const [contactEmail, setContactEmail] = useState('');
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [point, setPoint] = useState<Point | null>(null);
+  const lastAcceptedLocationRef = useRef<TimestampedLocation | null>(null);
   const [trail, setTrail] = useState<Point[]>([]);
   const [locationLabel, setLocationLabel] = useState('Location not shared');
   const [clock, setClock] = useState(0);
@@ -124,6 +174,20 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
     const timer = setInterval(refresh, 10_000);
     return () => { clearTimeout(initial); clearInterval(timer); };
   }, []);
+
+  useEffect(() => {
+    if (!pendingCheckIn) {
+      setCheckInSeconds(0);
+      return;
+    }
+    const refresh = () => {
+      const remaining = Math.max(0, Math.ceil((pendingCheckIn.deadline - Date.now()) / 1000));
+      setCheckInSeconds(remaining);
+    };
+    refresh();
+    const timer = setInterval(refresh, 1_000);
+    return () => clearInterval(timer);
+  }, [pendingCheckIn]);
 
   useEffect(() => {
     if (!journeyId || !supabaseReady || !supabase) return;
@@ -178,6 +242,10 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
         'companion-route-waypoints',
         'companion-evidence-consent',
         'companion-background-audio-enabled',
+        'companion-motion-enabled',
+        'companion-phrase-monitor-enabled',
+        'companion-share-journey-default',
+        ROUTE_DEVIATION_THRESHOLD_KEY,
         'companion-emergency-event-id',
       ]);
       const values = Object.fromEntries(saved);
@@ -185,6 +253,11 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
       if (values['companion-destination']) setDestination(values['companion-destination']!);
       if (values['companion-evidence-consent'] === 'true') setEvidenceConsent(true);
       if (values['companion-background-audio-enabled'] === 'false') setBackgroundAudioAllowed(false);
+      if (values['companion-motion-enabled'] === 'false') setMotionMonitoringAllowed(false);
+      if (values['companion-phrase-monitor-enabled'] === 'false') setPhraseMonitoringAllowed(false);
+      if (values['companion-share-journey-default'] === 'true') setShareEachJourney(true);
+      const savedThreshold = Number(values[ROUTE_DEVIATION_THRESHOLD_KEY]);
+      if (Number.isFinite(savedThreshold) && savedThreshold >= 50 && savedThreshold <= 500) setRouteDeviationThreshold(savedThreshold);
       if (values['companion-emergency-event-id']) {
         setEmergencyEventId(values['companion-emergency-event-id']!);
         setEmergencyMode(true);
@@ -197,17 +270,30 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
         } catch { setRouteWaypoints([]); }
       }
       if (values['companion-contacts']) setContacts(JSON.parse(values['companion-contacts']!));
-      if (values[LAST_LOCATION_KEY]) setPoint(JSON.parse(values[LAST_LOCATION_KEY]!));
+      if (values[LAST_LOCATION_KEY]) {
+        const savedPoint = JSON.parse(values[LAST_LOCATION_KEY]!) as Point;
+        setPoint(savedPoint);
+        if (typeof savedPoint.accuracy === 'number') lastAcceptedLocationRef.current = { ...savedPoint, accuracy: savedPoint.accuracy };
+      }
       const configuredPhrases = await loadTriggerPhrases();
       setTrigger(configuredPhrases.phrases[0]?.phrase ?? '');
       setTriggerPhrases(configuredPhrases.phrases);
       // Keep an active journey alive when Expo Router remounts this screen during tab navigation.
-      if (values[SESSION_KEY] === 'true') setActive(true);
+      if (values[SESSION_KEY] === 'true') {
+        const emergency = !!values['companion-emergency-event-id'];
+        setActive(true);
+        const restored = await restoreBackgroundLocationTask(emergency);
+        setLocationLabel(restored
+          ? emergency
+            ? 'Emergency journey restored; background location updates are active.'
+            : 'Journey restored; background location updates are active.'
+          : 'Journey restored while Companion is open; background location needs permission or could not restart.');
+      }
     })();
   }, []);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active || !motionMonitoringAllowed) return;
     let subscription: ReturnType<typeof DeviceMotion.addListener> | undefined;
     let cancelled = false;
     (async () => {
@@ -226,7 +312,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
       }
     })();
     return () => { cancelled = true; subscription?.remove(); };
-  }, [active]);
+  }, [active, motionMonitoringAllowed]);
 
   useEffect(() => {
     if (!active) return;
@@ -243,6 +329,17 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
             accuracy: location.coords.accuracy,
             timestamp: location.timestamp,
           };
+          if (next.accuracy === null || !shouldAcceptLocationUpdate(
+            { ...next, accuracy: next.accuracy },
+            lastAcceptedLocationRef.current,
+            { maxAccuracyMeters: 100, maxAgeMs: 30_000, now: Date.now() },
+          )) {
+            setLocationLabel(next.accuracy === null || next.accuracy > 100
+              ? 'GPS accuracy is poor; keeping the last accepted location.'
+              : 'GPS fix is stale; keeping the last accepted location.');
+            return;
+          }
+          lastAcceptedLocationRef.current = { ...next, accuracy: next.accuracy };
           setPoint(next);
           setTrail((current) => {
             const previous = current[current.length - 1];
@@ -252,12 +349,18 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
           setLocationLabel('Location is updating on this device');
           AsyncStorage.setItem(LAST_LOCATION_KEY, JSON.stringify(next));
           AsyncStorage.getItem(ACTIVE_JOURNEY_KEY).then((journeyId) => {
-            if (journeyId) void publishLocation(journeyId, next).catch(() => undefined);
+            if (journeyId) {
+              void publishLatestLocation(journeyId, next).then((synced) => {
+                if (!cancelled) setLocationLabel(synced
+                  ? 'Live location synced to your shared journey'
+                  : 'Location is saved on this device; waiting for a connection to sync the newest fix.');
+              });
+            }
           });
           if (activeRouteRef.current.length > 0) {
             routeOriginRef.current ??= { latitude: next.latitude, longitude: next.longitude };
             const route = [routeOriginRef.current, ...activeRouteRef.current];
-            const deviation = isRouteDeviation(next, route, { accuracyMeters: location.coords.accuracy ?? 0, thresholdMeters: 100 });
+            const deviation = isRouteDeviation(next, route, { accuracyMeters: location.coords.accuracy ?? 0, thresholdMeters: routeDeviationThreshold });
             if (deviation.deviated) routeDeviationCountRef.current += 1;
             else routeDeviationCountRef.current = 0;
             setRouteStatus(deviation.deviated ? `Off route · ${Math.round(deviation.distanceMeters)} m away` : `On route · ${Math.round(deviation.distanceMeters)} m from path`);
@@ -274,7 +377,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
       }
     })();
     return () => { cancelled = true; subscription?.remove(); };
-  }, [active, emergencyMode]);
+  }, [active, emergencyMode, routeDeviationThreshold]);
 
   const saveSetup = async () => {
     let parsedWaypoints: Coordinate[];
@@ -328,9 +431,24 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
       [ROUTE_DEVIATION_COUNT_KEY, '0'],
     ]);
     await AsyncStorage.removeItem(ROUTE_ORIGIN_KEY);
+    if (Platform.OS === 'android' && Number(Platform.Version) >= 33) {
+      try {
+        const permission = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS, {
+          title: 'Companion safety notifications',
+          message: 'Allow the ongoing journey monitor and safety check-in notifications to stay visible.',
+          buttonPositive: 'Allow',
+          buttonNegative: 'Not now',
+        });
+        setNotificationPermissionStatus(permission === PermissionsAndroid.RESULTS.GRANTED
+          ? 'Safety notifications are allowed.'
+          : 'Safety notifications are disabled. The operating system may hide monitor and check-in notifications.');
+      } catch {
+        setNotificationPermissionStatus('Notification permission could not be checked; review Companion permissions in Android Settings.');
+      }
+    }
     if (Platform.OS === 'web') {
       setVoiceStatus('Voice monitoring requires the installed iOS or Android app; this Safari preview only shows the interface');
-    } else {
+    } else if (phraseMonitoringAllowed) {
       try {
         // Load the native-only module only on device so Expo Web can render the shared screens.
         const { ExpoSpeechRecognitionModule } = await import('expo-speech-recognition');
@@ -338,6 +456,13 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
         if (!permission.granted) setVoiceStatus('Microphone or speech permission denied; voice monitoring will not run');
       } catch {
         setVoiceStatus('Native speech recognition is unavailable on this device');
+      }
+    } else if (backgroundAudioAllowed) {
+      try {
+        const permission = await requestRecordingPermissionsAsync();
+        if (!permission.granted) setVoiceStatus('Microphone permission denied; background distress-sound monitoring will not run');
+      } catch {
+        setVoiceStatus('Microphone permission could not be checked; background sound monitoring may not run');
       }
     }
     const foreground = await Location.requestForegroundPermissionsAsync();
@@ -362,6 +487,16 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
             setJourneyId(journeyId);
             try { await rememberJourneyId(signedInUser.id, journeyId); }
             catch { Alert.alert('Journey history is limited', 'This journey is active and sharing location, but could not be added to your account history.'); }
+            if (shareEachJourney) {
+              const emails = [...new Set(contacts.map((contact) => contact.email?.trim().toLowerCase()).filter((value): value is string => !!value))];
+              const shares = await Promise.allSettled(emails.map((contactEmail) => grantTrustedContactAccess(journeyId!, contactEmail)));
+              const granted = shares.filter((result) => result.status === 'fulfilled').length;
+              if (granted < emails.length || emails.length === 0) {
+                Alert.alert('Journey sharing needs attention', emails.length === 0
+                  ? 'No trusted contacts with email addresses are saved. Your journey is active, but it is not shared with a dashboard contact.'
+                  : `${granted} of ${emails.length} contacts received dashboard access. The others must have a Companion account and be saved as trusted contacts.`);
+              }
+            }
           }
         } catch {
           Alert.alert('Sharing is unavailable', 'The safety session can start on this phone, but account location sharing could not connect.');
@@ -369,22 +504,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
       }
       let backgroundRunning = false;
       if (backgroundGranted && Platform.OS !== 'web') {
-        try {
-          await Location.startLocationUpdatesAsync(LOCATION_TASK, {
-            accuracy: Location.Accuracy.High,
-            timeInterval: 5000,
-            distanceInterval: 5,
-            pausesUpdatesAutomatically: false,
-            foregroundService: {
-              notificationTitle: 'Companion safety journey active',
-              notificationBody: 'Your live location is being shared for this journey.',
-              killServiceOnDestroy: false,
-            },
-          });
-          backgroundRunning = true;
-        } catch {
-          backgroundRunning = false;
-        }
+        backgroundRunning = await restoreBackgroundLocationTask(false);
       }
       await AsyncStorage.setItem(SESSION_KEY, 'true');
       setEmergencyMode(false);
@@ -418,6 +538,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
     if (Platform.OS !== 'web' && await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK)) {
       await Location.stopLocationUpdatesAsync(LOCATION_TASK);
     }
+    await AsyncStorage.removeItem(BACKGROUND_LOCATION_EMERGENCY_CADENCE_KEY);
     await AsyncStorage.setItem(SESSION_KEY, 'false');
     setEmergencyMode(false);
     setEmergencyEventId(null);
@@ -426,6 +547,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
     if (journeyId) {
       try { await finishJourney(journeyId); } catch { /* Keep local stop available while offline. */ }
       await AsyncStorage.removeItem(ACTIVE_JOURNEY_KEY);
+      await clearPendingLocationUpload(journeyId);
     }
     setJourneyId(null);
     setActive(false);
@@ -445,6 +567,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
       await AsyncStorage.removeItem('companion-emergency-event-id');
       setEmergencyEventId(null);
       setEmergencyMode(false);
+      void restoreBackgroundLocationTask(false);
       Alert.alert('Emergency resolved', 'The event is marked resolved, your live journey is still active, and monitoring has resumed.');
     } catch (error) {
       Alert.alert('Could not resolve emergency', error instanceof Error ? error.message : 'Reconnect and try again.');
@@ -452,21 +575,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
   };
 
   const escalateBackgroundLocation = useCallback(async () => {
-    if (Platform.OS === 'web' || !await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK)) return;
-    try {
-      await Location.stopLocationUpdatesAsync(LOCATION_TASK);
-      await Location.startLocationUpdatesAsync(LOCATION_TASK, {
-        accuracy: Location.Accuracy.High,
-        timeInterval: 2000,
-        distanceInterval: 1,
-        pausesUpdatesAutomatically: false,
-        foregroundService: {
-          notificationTitle: 'Companion emergency tracking active',
-          notificationBody: 'Live location is being shared with your authorized contacts.',
-          killServiceOnDestroy: false,
-        },
-      });
-    } catch {
+    if (!await restoreBackgroundLocationTask(true)) {
       setLocationLabel('Emergency is active; Android may limit background GPS update frequency');
     }
   }, []);
@@ -485,13 +594,11 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
   }, [escalateBackgroundLocation, journeyId]);
 
   const createJourneySafetyAgent = useCallback(() => {
-    const agent = new SafetyAgent((action, reason) => {
+    const agent = new SafetyAgent((action, reason, deadline) => {
       if (action === 'prompt_user') {
-        Alert.alert('Safety check', reason || 'A possible fall or route issue was detected.', [
-          { text: "I'm safe", style: 'cancel', onPress: () => safetyAgentRef.current?.cancelPendingAlert() },
-          { text: 'Send SOS', style: 'destructive', onPress: () => { safetyAgentRef.current?.cancelPendingAlert(); void requestEmergency(reason || 'Safety check requested help'); } },
-        ], { cancelable: false });
+        setPendingCheckIn({ reason: reason || 'A possible distress signal was detected.', deadline: deadline ?? Date.now() + 12_000 });
       } else if (action === 'send_emergency') {
+        setPendingCheckIn(null);
         void requestEmergency(reason || 'Automatic distress detection');
       }
     });
@@ -520,7 +627,12 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
     const signalSubscription = CompanionMonitor.addListener('onDistressSignal', (signal) => {
       reportSafetySignal(signal);
     });
+    const safeSubscription = CompanionMonitor.addListener('onCheckInResolved', () => {
+      safetyAgentRef.current?.cancelPendingAlert();
+      setPendingCheckIn(null);
+    });
     (async () => {
+      let startupError: unknown = null;
       try {
         const { data: { session } } = supabase ? await supabase.auth.getSession() : { data: { session: null } };
         if (cancelled) return;
@@ -530,37 +642,110 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
           publishableKey: supabaseConfig.publishableKey,
           accessToken: session?.access_token ?? '',
           refreshToken: session?.refresh_token ?? '',
+          motionEnabled: motionMonitoringAllowed,
           audioEnabled: AppState.currentState !== 'active' && backgroundAudioAllowed,
         });
+      } catch (error) {
+        startupError = error;
+      }
+      if (cancelled) return;
+      try {
         if (AppState.currentState === 'active' || !backgroundAudioAllowed) await CompanionMonitor.setBackgroundAudioEnabled(false);
-      } catch {
-        setVoiceStatus('Native background audio monitoring could not start; foreground phrase monitoring remains available');
+      } catch (error) {
+        startupError ??= error;
+      }
+      try {
+        const status = await CompanionMonitor.getStatus();
+        if (cancelled) return;
+        if (status.running) {
+          const audioEnabled = status.audioMonitoring ?? (AppState.currentState !== 'active' && backgroundAudioAllowed);
+          const motionEnabled = status.motionMonitoring ?? motionMonitoringAllowed;
+          setNativeMonitorStatus(audioEnabled && motionEnabled
+            ? 'Android background sound and motion monitoring are running.'
+            : audioEnabled
+              ? 'Android background sound monitoring is running; motion checks are disabled.'
+              : motionEnabled
+                ? 'Android motion checks are running. Background sound monitoring pauses while Companion is open.'
+                : 'Android monitoring service is running; sound and motion checks are disabled.');
+        } else {
+          setNativeMonitorStatus(startupError
+            ? `Android monitor is not running: ${startupError instanceof Error ? startupError.message : 'start failed'}`
+            : status.status || 'Android monitor is not running.');
+        }
+      } catch (error) {
+        if (!cancelled) setNativeMonitorStatus(startupError || error
+          ? `Android monitor status could not be verified: ${startupError instanceof Error ? startupError.message : error instanceof Error ? error.message : 'unknown error'}`
+          : 'Android monitor status could not be verified.');
       }
     })();
     return () => {
       cancelled = true;
       signalSubscription.remove();
+      safeSubscription.remove();
     };
-  }, [active, journeyId, backgroundAudioAllowed]);
+  }, [active, journeyId, backgroundAudioAllowed, motionMonitoringAllowed]);
 
-  const onTriggerPhrase = useCallback((phrase: TriggerPhrase, confidence: number) => {
-    const isLoudSoundCue = phrase.id === '__loud-sound__';
+  const onTriggerPhrase = useCallback((phrase: TriggerPhrase, confidence: number | null) => {
+    setVoiceStatus(confidence !== null && confidence < 0.65
+      ? `Possible SOS phrase heard at ${Math.round(confidence * 100)}% confidence; the current threshold is 65%. No action was taken.`
+      : confidence === null
+        ? phrase.independentActivation
+          ? 'Exact saved SOS phrase transcribed. Android provided no confidence score; the configured phrase is activating the emergency protocol.'
+          : 'Exact saved SOS phrase transcribed without a confidence score. Answer the safety check now to avoid escalation.'
+        : phrase.independentActivation
+          ? 'SOS phrase recognized. Activating the emergency protocol.'
+          : 'SOS phrase recognized. Answer the safety check now to avoid escalation.');
     reportSafetySignal({
-      kind: isLoudSoundCue ? 'loud_audio' : 'private_phrase',
-      confidence,
+      kind: 'private_phrase',
+      confidence: confidence ?? 0,
+      confidenceAvailable: confidence !== null,
       timestamp: Date.now(),
       signalId: `phrase-${phrase.id}-${Date.now()}`,
-      exactPhraseMatch: !isLoudSoundCue,
+      exactPhraseMatch: true,
       independentActivation: phrase.independentActivation,
     });
   }, []);
+
+  const confirmSafeFromCheckIn = () => {
+    safetyAgentRef.current?.cancelPendingAlert();
+    setPendingCheckIn(null);
+    if (Platform.OS === 'android' && CompanionMonitor) void CompanionMonitor.confirmSafe().catch(() => undefined);
+  };
+
+  const requestHelpFromCheckIn = () => {
+    const reason = pendingCheckIn?.reason || 'Safety check requested help';
+    safetyAgentRef.current?.cancelPendingAlert();
+    setPendingCheckIn(null);
+    void requestEmergency(reason);
+  };
 
   const triggerEmergency = () => {
     void requestEmergency('Manual SOS');
   };
 
+  const downloadOfflineSpeechModel = async () => {
+    if (Platform.OS !== 'android') return;
+    try {
+      const { ExpoSpeechRecognitionModule } = await import('expo-speech-recognition');
+      const result = await ExpoSpeechRecognitionModule.androidTriggerOfflineModelDownload({ locale: 'en-US' });
+      if (result.status === 'download_success') {
+        setVoiceStatus('English offline speech model downloaded. Restarting phrase recognition…');
+        setSpeechRetryToken((token) => token + 1);
+      } else if (result.status === 'download_scheduled') {
+        setVoiceStatus('English offline speech model download is queued. Keep the phone online, then tap retry after it completes.');
+      } else {
+        setVoiceStatus('Android opened offline speech model setup. Download English (US), then return here and tap retry.');
+      }
+    } catch (error) {
+      setVoiceStatus(`Could not open Android speech model setup: ${error instanceof Error ? error.message : 'recognizer unavailable'}`);
+    }
+  };
+
   const addContact = () => {
-    if (!contactName.trim() || (!contactPhone.trim() && !contactEmail.trim())) return;
+    if (!contactName.trim() || !contactEmail.trim()) {
+      Alert.alert('Contact email required', 'Automatic alerts currently use email only. Phone numbers can be saved, but SMS is not configured, so add an email address for this trusted contact.');
+      return;
+    }
     setContacts((current) => [...current, { name: contactName.trim(), phone: contactPhone.trim(), email: contactEmail.trim().toLowerCase() }]);
     setContactName('');
     setContactPhone('');
@@ -601,7 +786,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="dark" />
-      <SpeechMonitor active={active && !emergencyMode && (Platform.OS !== 'android' || appForeground)} phrases={triggerPhrases} onStatus={setVoiceStatus} onPhrase={onTriggerPhrase} />
+      <SpeechMonitor active={active && phraseMonitoringAllowed && !emergencyMode && (Platform.OS !== 'android' || appForeground)} phrases={triggerPhrases} retryToken={speechRetryToken} onStatus={setVoiceStatus} onPhrase={onTriggerPhrase} />
       <EmergencyAudioCapture eventId={emergencyEventId} consent={evidenceConsent} onStatus={setEvidenceStatus} />
       <EmergencyVideoCapture eventId={emergencyEventId} journeyId={journeyId} consent={evidenceConsent} onStatus={setEvidenceStatus} />
       <KeyboardAvoidingView style={styles.safe} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -614,6 +799,18 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
         </View>
         <View style={styles.safetyNotice}><View style={styles.safetyNoticeDot} /><Text style={styles.safetyNoticeText}>LIVE SAFETY FEATURES DEPEND ON PERMISSIONS AND NETWORK</Text></View>
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+          {!!pendingCheckIn && !emergencyMode && <View style={styles.checkInCard} accessibilityLiveRegion="assertive">
+            <Text style={styles.checkInHeading}>SAFETY CHECK · {checkInSeconds}s</Text>
+            <Text style={styles.checkInBody}>{pendingCheckIn.reason} If you do not respond, Companion will activate an emergency alert.</Text>
+            <View style={styles.checkInActions}>
+              <TouchableOpacity style={styles.checkInSafeButton} onPress={confirmSafeFromCheckIn} accessibilityRole="button">
+                <Text style={styles.checkInSafeText}>I’m safe</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.checkInSosButton} onPress={requestHelpFromCheckIn} accessibilityRole="button">
+                <Text style={styles.checkInSosText}>Send SOS now</Text>
+              </TouchableOpacity>
+            </View>
+          </View>}
           {tab === 'journey' && <>
             <View style={styles.eyebrowRow}><Text style={styles.eyebrow}>YOUR SAFETY TODAY</Text><View style={styles.pilot}><Text style={styles.pilotText}>COMPANION</Text></View></View>
             <Text style={styles.title}>A safer day{ '\n' }starts here.</Text>
@@ -628,10 +825,15 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
             </View>}
 
             <View style={styles.monitorCard}><View style={styles.monitorTop}><View style={[styles.pillDot, active && styles.pillDotOn]} /><Text style={styles.monitorHeading}>{active ? 'Journey monitoring active' : 'Monitoring ready'}</Text></View><Text style={styles.monitorBody}>{active ? 'Live location is updating for your active journey.' : 'Start a journey to enable live location and available safety checks.'}</Text><View style={styles.monitorTags}><Text style={styles.monitorTag}>VOICE CUES</Text><Text style={styles.monitorTag}>{triggerPhrases.length} PHRASES</Text><Text style={styles.monitorTag}>LOCATION</Text></View></View>
+            {!!voiceStatus && <Text style={styles.mapLocationStatus}>{voiceStatus}</Text>}
 
             <LiveLocationMap point={point} trail={trail} active={active} route={routeWaypoints} />
-            <Text style={[styles.mapLocationStatus, point && isLocationStale(point.timestamp, clock) && { color: colors.red }]}>{point ? `${point.latitude.toFixed(5)}, ${point.longitude.toFixed(5)} · ${isLocationStale(point.timestamp, clock) ? 'STALE · ' : ''}${new Date(point.timestamp).toLocaleTimeString()}` : locationLabel}</Text>
-            <Text style={styles.mapLocationStatus}>{voiceStatus}</Text>
+            <Text style={[styles.mapLocationStatus, point && isLocationStale(point.timestamp, clock) && { color: colors.red }]}>{point ? `${point.latitude.toFixed(5)}, ${point.longitude.toFixed(5)} · ${isLocationStale(point.timestamp, clock) ? 'STALE · ' : ''}${new Date(point.timestamp).toLocaleTimeString()}${locationLabel.startsWith('GPS ') ? ` · ${locationLabel}` : ''}` : locationLabel}</Text>
+            {!!nativeMonitorStatus && <Text style={styles.mapLocationStatus}>{nativeMonitorStatus}</Text>}
+            {!!notificationPermissionStatus && <Text style={[styles.mapLocationStatus, notificationPermissionStatus.includes('disabled') && { color: colors.red }]}>{notificationPermissionStatus}</Text>}
+            {Platform.OS === 'android' && active && !emergencyMode && /not yet downloaded|download is queued|opened speech model setup/i.test(voiceStatus) && <TouchableOpacity onPress={() => void downloadOfflineSpeechModel()} style={styles.speechSetupButton} accessibilityRole="button" accessibilityLabel="Download offline English speech model">
+              <Text style={styles.speechSetupButtonText}>{/not yet downloaded/i.test(voiceStatus) ? 'Download offline English model' : 'Retry speech setup'}</Text>
+            </TouchableOpacity>}
             {emergencyEventId && <Text style={styles.mapLocationStatus}>{evidenceStatus}</Text>}
             {routeWaypoints.length > 0 && <Text style={[styles.mapLocationStatus, routeStatus.startsWith('Off route') && { color: colors.red }]}>{routeStatus}</Text>}
 
@@ -649,7 +851,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
               <View style={styles.divider} />
               <Text style={styles.cardLabel}>ROUTE CHECKPOINTS (OPTIONAL)</Text>
               <TextInput value={routeWaypointText} onChangeText={setRouteWaypointText} placeholder="-26.2041, 28.0473; -26.2100, 28.0500" placeholderTextColor={colors.muted} style={styles.input} />
-              <Text style={styles.helper}>Enter latitude, longitude checkpoints separated by semicolons, or enter a destination and start a journey to plan a road route from your current location. Three consecutive fixes more than 100 m off route prompt a safety check. Destination and approximate origin are sent to public geocoding and directions services.</Text>
+              <Text style={styles.helper}>Enter latitude, longitude checkpoints separated by semicolons, or enter a destination and start a journey to plan a road route from your current location. Three consecutive fixes beyond the selected threshold and GPS-accuracy allowance prompt a safety check. Destination and approximate origin are sent to public geocoding and directions services.</Text>
             </View>
 
             <TouchableOpacity style={[styles.primaryButton, active && styles.stopButton]} onPress={active ? stopJourney : startJourney}>
@@ -664,7 +866,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
             <View style={styles.inputCard}><Text style={styles.cardLabel}>TRUSTED CONTACTS</Text>
               {contacts.length === 0 ? <Text style={styles.emptyText}>No contacts added yet. Add at least one person for your safety circle.</Text> : contacts.map((contact, index) => <View key={`${contact.phone}-${contact.email}-${index}`} style={styles.contactRow}><View style={styles.contactAvatar}><Text style={styles.contactInitial}>{contact.name[0]?.toUpperCase()}</Text></View><View style={{ flex: 1 }}><Text style={styles.contactName}>{contact.name}</Text><Text style={styles.contactPhone}>{[contact.phone, contact.email].filter(Boolean).join(' · ')}</Text>{contact.email && <TouchableOpacity onPress={() => shareJourneyWith(contact.email)}><Text style={styles.shareLink}>Grant active journey access</Text></TouchableOpacity>}</View><TouchableOpacity onPress={() => setContacts((items) => items.filter((_, i) => i !== index))}><Text style={styles.remove}>×</Text></TouchableOpacity></View>)}
             </View>
-            <View style={styles.inputCard}><Text style={styles.cardLabel}>ADD A PERSON</Text><TextInput value={contactName} onChangeText={setContactName} placeholder="Name" placeholderTextColor={colors.muted} style={styles.input} /><View style={styles.divider} /><TextInput value={contactPhone} onChangeText={setContactPhone} placeholder="Phone number (optional)" keyboardType="phone-pad" placeholderTextColor={colors.muted} style={styles.input} /><View style={styles.divider} /><TextInput value={contactEmail} onChangeText={setContactEmail} placeholder="Email (optional)" keyboardType="email-address" autoCapitalize="none" placeholderTextColor={colors.muted} style={styles.input} /></View>
+            <View style={styles.inputCard}><Text style={styles.cardLabel}>ADD A PERSON</Text><TextInput value={contactName} onChangeText={setContactName} placeholder="Name" placeholderTextColor={colors.muted} style={styles.input} /><View style={styles.divider} /><TextInput value={contactPhone} onChangeText={setContactPhone} placeholder="Phone number (saved; SMS unavailable)" keyboardType="phone-pad" placeholderTextColor={colors.muted} style={styles.input} /><View style={styles.divider} /><TextInput value={contactEmail} onChangeText={setContactEmail} placeholder="Email (required for automatic alerts)" keyboardType="email-address" autoCapitalize="none" placeholderTextColor={colors.muted} style={styles.input} /></View>
             <TouchableOpacity style={styles.primaryButton} onPress={addContact}><Text style={styles.primaryButtonText}>Add trusted contact</Text><Text style={styles.buttonArrow}>+</Text></TouchableOpacity>
             <TouchableOpacity style={styles.secondaryButton} onPress={saveSetup}><Text style={styles.secondaryText}>Save safety circle</Text></TouchableOpacity>
             <Text style={styles.privacyNote}>Emergency and evidence alerts use email only. Provider credentials stay in Supabase Edge Function secrets.</Text>
@@ -678,6 +880,14 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
               <Text style={styles.cardLabel}>MONITORING</Text>
               <Text style={styles.helper}>Saved phrases are checked by the device speech-recognition service while a journey is active and the app is open. Android also has a background YAMNet shout/scream classifier and fall heuristic when a signed-in Supabase journey and required permissions are active. Their thresholds are unvalidated. An independent SOS phrase can trigger an emergency alert automatically; lower-confidence sound and motion signals may ask you to check in. This prototype cannot contact emergency services.</Text>
               <View style={styles.statusRow}>
+                <Text style={[styles.helper, { flex: 1, marginTop: 0 }]}>Recognize saved phrases while Companion is open during an active journey.</Text>
+                <Switch value={phraseMonitoringAllowed} onValueChange={(value) => {
+                  setPhraseMonitoringAllowed(value);
+                  void AsyncStorage.setItem('companion-phrase-monitor-enabled', String(value));
+                  setVoiceStatus(value ? 'Personal phrase recognition enabled' : 'Personal phrase recognition disabled');
+                }} accessibilityLabel="Allow personal SOS phrase monitoring" />
+              </View>
+              <View style={styles.statusRow}>
                 <Text style={[styles.helper, { flex: 1, marginTop: 0 }]}>Allow Android to use the microphone for on-device distress-sound checks while this app is backgrounded during an active journey.</Text>
                 <Switch value={backgroundAudioAllowed} onValueChange={(value) => {
                   setBackgroundAudioAllowed(value);
@@ -686,7 +896,27 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
                   setVoiceStatus(value ? 'Background microphone monitoring allowed for active journeys' : 'Background microphone monitoring disabled by you');
                 }} accessibilityLabel="Allow background microphone distress monitoring" />
               </View>
-              <Text style={styles.helper}>Turning this off keeps motion and live-location monitoring enabled; personalized speech phrases are only recognized while the app is foregrounded.</Text>
+              <View style={styles.statusRow}>
+                <Text style={[styles.helper, { flex: 1, marginTop: 0 }]}>Detect possible falls from motion during this journey.</Text>
+                <Switch value={motionMonitoringAllowed} onValueChange={(value) => {
+                  setMotionMonitoringAllowed(value);
+                  void AsyncStorage.setItem('companion-motion-enabled', String(value));
+                  if (Platform.OS === 'android' && active && CompanionMonitor) void CompanionMonitor.setMotionMonitoringEnabled(value).catch(() => setNativeMonitorStatus('Android motion monitoring preference could not be applied'));
+                }} accessibilityLabel="Allow fall and motion monitoring" />
+              </View>
+              <View style={styles.statusRow}>
+                <Text style={[styles.helper, { flex: 1, marginTop: 0 }]}>Grant live dashboard access to the trusted contacts saved with an email and Companion account when each journey starts.</Text>
+                <Switch value={shareEachJourney} onValueChange={(value) => {
+                  setShareEachJourney(value);
+                  void AsyncStorage.setItem('companion-share-journey-default', String(value));
+                }} accessibilityLabel="Share each journey with trusted contacts by default" />
+              </View>
+              <Text style={[styles.helper, { marginTop: 14 }]}>Route deviation threshold: {routeDeviationThreshold} m (GPS accuracy is added; alerts require three consecutive fixes).</Text>
+              <View style={styles.thresholdOptions}>{[50, 75, 100, 150, 200].map((meters) => <TouchableOpacity key={meters} style={[styles.thresholdOption, routeDeviationThreshold === meters && styles.thresholdOptionSelected]} onPress={() => {
+                setRouteDeviationThreshold(meters);
+                void AsyncStorage.setItem(ROUTE_DEVIATION_THRESHOLD_KEY, String(meters));
+              }} accessibilityRole="radio" accessibilityState={{ selected: routeDeviationThreshold === meters }}><Text style={[styles.thresholdOptionText, routeDeviationThreshold === meters && styles.thresholdOptionTextSelected]}>{meters} m</Text></TouchableOpacity>)}</View>
+              <Text style={styles.helper}>Personal phrases are recognized only while Companion is foregrounded. Background service detects sounds and motion separately. Turning off a monitor keeps location tracking enabled.</Text>
             </View>
             <View style={styles.inputCard}>
               <Text style={styles.cardLabel}>EMERGENCY AUDIO EVIDENCE</Text>
@@ -699,6 +929,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
             <View style={styles.noticeCard}><Text style={styles.noticeIcon}>◉</Text><View style={{ flex: 1 }}><Text style={styles.noticeTitle}>You are in control</Text><Text style={styles.noticeBody}>Monitoring and recording must be clearly shown, opt-in, and limited to an active safety session.</Text></View></View>
             <View style={styles.inputCard}>
               <Text style={styles.cardLabel}>PRIVACY AND PERMISSIONS</Text>
+              {!!notificationPermissionStatus && <Text style={styles.helper}>{notificationPermissionStatus}</Text>}
               <TouchableOpacity style={styles.secondaryButton} onPress={() => void NativeLinking.openSettings().catch(() => Alert.alert('Settings unavailable', 'Open Android Settings → Apps → Companion → Permissions to review location, microphone, camera, and notification access.'))}><Text style={styles.secondaryText}>Review app permissions</Text></TouchableOpacity>
               <TouchableOpacity style={styles.secondaryButton} onPress={() => Alert.alert('Sign out of Companion?', active ? 'Signing out will end this journey and stop Companion monitoring on this device.' : 'You can sign back in later with the same account.', [
                 { text: 'Cancel', style: 'cancel' },
@@ -756,6 +987,10 @@ const styles = StyleSheet.create({
   monitorCard: { backgroundColor: '#151515', padding: 16, borderRadius: 15, marginBottom: 14 }, monitorTop: { flexDirection: 'row', alignItems: 'center', gap: 8 }, monitorHeading: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' }, monitorBody: { color: '#D1D1D1', fontSize: 11, lineHeight: 16, marginTop: 8 }, monitorTags: { flexDirection: 'row', gap: 7, marginTop: 13, flexWrap: 'wrap' }, monitorTag: { color: '#FFFFFF', backgroundColor: '#303030', borderRadius: 12, overflow: 'hidden', fontSize: 8, letterSpacing: 0.6, fontWeight: '800', paddingHorizontal: 8, paddingVertical: 5 },
   mapCard: { height: 234, borderRadius: 18, backgroundColor: '#E9E9E7', overflow: 'hidden', borderWidth: 1, borderColor: colors.line, padding: 15, justifyContent: 'space-between' }, mapGrid: { ...StyleSheet.absoluteFill, opacity: 0.4, backgroundColor: '#E9E9E7' }, mapRoadA: { position: 'absolute', height: 17, width: 340, backgroundColor: '#D9D9D6', top: 118, left: -55, transform: [{ rotate: '-22deg' }] }, mapRoadB: { position: 'absolute', height: 12, width: 330, backgroundColor: '#D9D9D6', top: 130, right: -150, transform: [{ rotate: '54deg' }] }, mapRoute: { position: 'absolute', height: 3, width: 175, backgroundColor: colors.teal, top: 123, left: 88, transform: [{ rotate: '-36deg' }], borderRadius: 4 }, mapTop: { flexDirection: 'row', alignItems: 'center', zIndex: 1 }, pulse: { height: 7, width: 7, borderRadius: 4, backgroundColor: colors.muted, marginRight: 7 }, pulseActive: { backgroundColor: colors.teal }, mapLive: { color: colors.ink, fontSize: 9, letterSpacing: 1.3, fontWeight: '800', flex: 1 }, mapTime: { color: colors.muted, fontSize: 9, letterSpacing: 1.2 }, mapPin: { position: 'absolute', top: 91, left: '55%', width: 34, height: 34, borderRadius: 18, borderWidth: 7, borderColor: '#D52B3740', backgroundColor: colors.teal, alignItems: 'center', justifyContent: 'center', zIndex: 2 }, pinText: { color: '#FFFFFF', fontSize: 10 }, mapCallout: { position: 'absolute', top: 52, left: 15, backgroundColor: '#FFFFFF', padding: 10, borderRadius: 10, zIndex: 2, borderWidth: 1, borderColor: colors.line }, calloutTitle: { color: colors.ink, fontSize: 10, fontWeight: '700' }, calloutText: { color: colors.muted, fontSize: 9, marginTop: 4 }, mapFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', zIndex: 1 }, coord: { color: colors.muted, fontSize: 9, letterSpacing: 1.2 }, mapArrow: { color: colors.teal, fontSize: 18 },
   mapLocationStatus: { color: colors.muted, fontSize: 10, textAlign: 'center', marginTop: 8, marginBottom: 8 },
+  checkInCard: { backgroundColor: '#FFF3DC', borderWidth: 2, borderColor: '#C96912', borderRadius: 15, padding: 16, marginBottom: 15 }, checkInHeading: { color: '#8B3D0A', fontSize: 14, letterSpacing: 0.7, fontWeight: '900' }, checkInBody: { color: colors.ink, fontSize: 13, lineHeight: 19, marginTop: 8 }, checkInActions: { flexDirection: 'row', gap: 10, marginTop: 13 }, checkInSafeButton: { flex: 1, minHeight: 48, borderRadius: 10, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#C96912', alignItems: 'center', justifyContent: 'center' }, checkInSafeText: { color: '#6D330B', fontSize: 13, fontWeight: '800' }, checkInSosButton: { flex: 1, minHeight: 48, borderRadius: 10, backgroundColor: colors.red, alignItems: 'center', justifyContent: 'center' }, checkInSosText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
+  speechSetupButton: { minHeight: 42, alignSelf: 'center', paddingHorizontal: 16, borderRadius: 11, backgroundColor: colors.teal, justifyContent: 'center', marginTop: 2, marginBottom: 10 },
+  speechSetupButtonText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' },
+  thresholdOptions: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 9 }, thresholdOption: { borderWidth: 1, borderColor: colors.line, borderRadius: 9, paddingVertical: 8, paddingHorizontal: 11, backgroundColor: '#FFFFFF' }, thresholdOptionSelected: { backgroundColor: colors.ink, borderColor: colors.ink }, thresholdOptionText: { color: colors.ink, fontSize: 10, fontWeight: '700' }, thresholdOptionTextSelected: { color: '#FFFFFF' },
   statusRow: { flexDirection: 'row', gap: 8, marginTop: 13, marginBottom: 15 }, pill: { backgroundColor: colors.panel, borderRadius: 30, paddingHorizontal: 11, paddingVertical: 8, flexDirection: 'row', alignItems: 'center' }, pillDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.muted, marginRight: 7 }, pillDotOn: { backgroundColor: colors.teal }, pillText: { color: colors.ink, fontSize: 10 },
   inputCard: { padding: 16, backgroundColor: colors.panel, borderRadius: 15, borderWidth: 1, borderColor: colors.line, marginTop: 10 }, cardLabel: { color: colors.muted, fontSize: 9, letterSpacing: 1.35, fontWeight: '800', marginBottom: 10 }, input: { color: colors.ink, fontSize: 14, paddingVertical: 6 }, triggerDisplay: { color: colors.ink, fontSize: 14, fontWeight: '600' }, divider: { height: 1, backgroundColor: colors.line, marginVertical: 13 },
   primaryButton: { marginTop: 16, backgroundColor: colors.teal, borderRadius: 13, height: 54, paddingHorizontal: 17, alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' }, stopButton: { backgroundColor: colors.panel2, borderWidth: 1, borderColor: colors.red }, primaryButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14 }, buttonArrow: { color: '#FFFFFF', fontSize: 23, fontWeight: '400' },

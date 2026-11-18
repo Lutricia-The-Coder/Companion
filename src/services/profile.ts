@@ -6,13 +6,23 @@ import { LOCATION_TASK, SESSION_KEY } from './backgroundLocation';
 import { ACTIVE_JOURNEY_KEY } from './journeys';
 import { saveTriggerPhrases } from './triggerPhrases';
 import { clearLocalEmergencyEvidence } from './evidence';
+import { clearPendingLocationUpload } from './locationPublishing';
 
 export type TrustedContact = { name: string; phone?: string; email?: string };
+export type NotificationPreferences = { email: boolean; route_deviation: boolean };
 
 export async function saveTrustedContacts(uid: string, contacts: TrustedContact[]) {
   const client = requireSupabase();
   const { error } = await client.from('profiles').update({
     trusted_contacts: contacts,
+    updated_at: new Date().toISOString(),
+  }).eq('id', uid);
+  if (error) throw error;
+}
+
+export async function saveNotificationPreferences(uid: string, preferences: NotificationPreferences) {
+  const { error } = await requireSupabase().from('profiles').update({
+    notification_preferences: preferences,
     updated_at: new Date().toISOString(),
   }).eq('id', uid);
   if (error) throw error;
@@ -40,9 +50,14 @@ export async function deleteAccount() {
     AsyncStorage.multiRemove([
       ACTIVE_JOURNEY_KEY, SESSION_KEY, 'companion-contacts', 'companion-destination',
       'companion-route-waypoints', 'companion-emergency-event-id', 'companion-evidence-consent',
-      'companion-background-audio-enabled', 'companion-emergency-audio-evidence-v1',
+      'companion-background-audio-enabled', 'companion-motion-enabled', 'companion-phrase-monitor-enabled',
+      'companion-share-journey-default', 'companion-notification-preferences-pending',
+      'companion-route-deviation-threshold-m',
+      'companion-background-location-emergency-cadence',
+      'companion-emergency-audio-evidence-v1',
     ]),
     saveTriggerPhrases([]),
     clearLocalEmergencyEvidence(),
+    clearPendingLocationUpload(),
   ]);
 }

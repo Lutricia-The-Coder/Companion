@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Alert, Switch, Text, View } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '../lib/supabase';
+import { saveNotificationPreferences } from '../services/profile';
 
 type Preferences = { email: boolean; route_deviation: boolean };
 const DEFAULTS: Preferences = { email: true, route_deviation: true };
@@ -17,15 +19,36 @@ export default function NotificationPreferences() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      if (!supabase) return;
+      const pendingRaw = await AsyncStorage.getItem('companion-notification-preferences-pending');
+      let pending: Partial<Preferences> | null = null;
+      try { if (pendingRaw) pending = JSON.parse(pendingRaw) as Partial<Preferences>; }
+      catch { await AsyncStorage.removeItem('companion-notification-preferences-pending'); }
+      if (!supabase) {
+        if (pending) setPreferences({ ...DEFAULTS, ...pending });
+        return;
+      }
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      if (!user) {
+        if (pending) setPreferences({ ...DEFAULTS, ...pending });
+        return;
+      }
+      let pendingSyncFailed = false;
+      if (pending && typeof pending.email === 'boolean' && typeof pending.route_deviation === 'boolean') {
+        try {
+          await saveNotificationPreferences(user.id, pending as Preferences);
+          await AsyncStorage.removeItem('companion-notification-preferences-pending');
+        } catch { pendingSyncFailed = true; }
+      }
       const { data, error } = await supabase.from('profiles').select('notification_preferences').eq('id', user.id).single();
       if (cancelled) return;
-      if (error) { setStatus('Could not load saved preferences.'); return; }
-      const stored = (data.notification_preferences ?? {}) as Partial<Preferences>;
+      if (error) {
+        if (pending) setPreferences({ ...DEFAULTS, ...pending });
+        setStatus(pending ? 'Using device-saved preferences; account sync will retry when connected.' : 'Could not load saved preferences.');
+        return;
+      }
+      const stored = (pendingSyncFailed ? pending : data.notification_preferences ?? {}) as Partial<Preferences>;
       setPreferences({ ...DEFAULTS, ...stored });
-      setStatus('Preferences are synced to your account.');
+      setStatus(pendingSyncFailed ? 'Using device-saved preferences; account sync will retry when connected.' : 'Preferences are synced to your account.');
     })();
     return () => { cancelled = true; };
   }, []);
@@ -37,18 +60,17 @@ export default function NotificationPreferences() {
     }
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) { Alert.alert('Sign in required', 'Sign in before changing notification preferences.'); return; }
-    const previous = preferences;
     const next = { ...preferences, [key]: value };
     setPreferences(next);
     setBusy(true);
     try {
-      const { error } = await supabase.from('profiles').update({ notification_preferences: next, updated_at: new Date().toISOString() }).eq('id', user.id);
-      if (error) throw error;
+      await AsyncStorage.setItem('companion-notification-preferences-pending', JSON.stringify(next));
+      await saveNotificationPreferences(user.id, next);
+      await AsyncStorage.removeItem('companion-notification-preferences-pending');
       setStatus('Preferences are synced to your account.');
     } catch (error) {
-      setPreferences(previous);
-      setStatus('Could not save the preference.');
-      Alert.alert('Preference not saved', error instanceof Error ? error.message : 'Try again when your network is available.');
+      setStatus('Saved on this device; account sync will retry when connected.');
+      Alert.alert('Preference saved on this device', error instanceof Error ? error.message : 'Account sync will retry when connected.');
     } finally {
       setBusy(false);
     }

@@ -14,9 +14,9 @@ export type SafetyAgentPolicy = Partial<SafetyEnginePolicy>;
 export class SafetyAgent {
   private readonly engine: SafetyDecisionEngine;
   private confirmationTimer: ReturnType<typeof setTimeout> | null = null;
-  private readonly onAction: (action: AgentAction, reason?: string) => void;
+  private readonly onAction: (action: AgentAction, reason?: string, deadline?: number) => void;
 
-  constructor(onAction: (action: AgentAction, reason?: string) => void, policy: SafetyAgentPolicy = {}) {
+  constructor(onAction: (action: AgentAction, reason?: string, deadline?: number) => void, policy: SafetyAgentPolicy = {}) {
     this.engine = new SafetyDecisionEngine(policy);
     this.onAction = onAction;
   }
@@ -55,7 +55,7 @@ export class SafetyAgent {
   private consume(actions: SafetyEngineAction[]) {
     for (const action of actions) {
       if (action.type === 'request_check_in') {
-        this.onAction('prompt_user', action.reason);
+        this.onAction('prompt_user', action.reason, action.deadline);
         this.clearConfirmationTimer();
         this.confirmationTimer = setTimeout(() => {
           this.confirmationTimer = null;

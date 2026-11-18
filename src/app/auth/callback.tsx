@@ -3,7 +3,7 @@ import { ActivityIndicator, SafeAreaView, StyleSheet, Text, TouchableOpacity } f
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '../../lib/supabase';
-import { saveTrustedContacts, type TrustedContact } from '../../services/profile';
+import { saveNotificationPreferences, saveTrustedContacts, type NotificationPreferences, type TrustedContact } from '../../services/profile';
 
 export default function AuthCallbackScreen() {
   const router = useRouter();
@@ -43,6 +43,18 @@ export default function AuthCallbackScreen() {
           if (Array.isArray(contacts)) await saveTrustedContacts(user.id, contacts);
         } catch {
           // Authentication is already confirmed; the app can sync contacts again from its settings screen.
+        }
+      }
+      const storedPreferences = await AsyncStorage.getItem('companion-notification-preferences-pending');
+      if (user && storedPreferences) {
+        try {
+          const preferences = JSON.parse(storedPreferences) as NotificationPreferences;
+          if (typeof preferences.email === 'boolean' && typeof preferences.route_deviation === 'boolean') {
+            await saveNotificationPreferences(user.id, preferences);
+            await AsyncStorage.removeItem('companion-notification-preferences-pending');
+          }
+        } catch {
+          // Keep the local copy so Settings can retry syncing it after confirmation.
         }
       }
       router.replace('/');
