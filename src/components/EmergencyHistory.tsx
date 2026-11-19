@@ -105,7 +105,15 @@ export default function EmergencyHistory() {
       <Text style={s.meta}>Local files expire after 30 days. Uploaded files stay in private storage and are visible only to authorized journey viewers until their server expiry.</Text>
       {evidence.some((item) => item.uploadStatus !== 'uploaded') ? <TouchableOpacity style={s.refresh} disabled={retryingUploads} onPress={() => {
         setRetryingUploads(true);
-        void uploadPendingEmergencyEvidence({ retryFailed: true }).then(async () => setEvidence(await loadEvidenceOutbox())).catch((cause) => Alert.alert('Upload retry failed', cause instanceof Error ? cause.message : 'Try again when connected.')).finally(() => setRetryingUploads(false));
+        void uploadPendingEmergencyEvidence({ retryFailed: true, retryNow: true }).then(async (result) => {
+          setEvidence(await loadEvidenceOutbox());
+          const summary = result.uploaded > 0
+            ? `${result.uploaded} evidence file${result.uploaded === 1 ? '' : 's'} uploaded privately.`
+            : result.errors.length > 0
+              ? result.errors.join('\n')
+              : 'No queued files were eligible to upload. Check that you are signed in and the recording belongs to a journey.';
+          Alert.alert(result.uploaded > 0 ? 'Upload retry complete' : 'Upload could not complete', summary);
+        }).catch((cause) => Alert.alert('Upload retry failed', cause instanceof Error ? cause.message : 'Try again when connected.')).finally(() => setRetryingUploads(false));
       }}><Text style={s.refreshText}>{retryingUploads ? 'Retrying…' : 'Retry evidence uploads'}</Text></TouchableOpacity> : null}
       {evidence.map((item) => <LocalEvidenceCard key={item.evidenceId} item={item} onDeleted={async () => setEvidence(await loadEvidenceOutbox())} />)}
     </View> : null}

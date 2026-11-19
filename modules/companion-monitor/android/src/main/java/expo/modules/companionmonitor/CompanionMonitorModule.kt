@@ -3,6 +3,7 @@ package expo.modules.companionmonitor
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import java.io.File
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
@@ -55,6 +56,28 @@ class CompanionMonitorModule : Module() {
           .setAction(CompanionMonitorService.ACTION_SET_MOTION)
           .putExtra(CompanionMonitorService.EXTRA_MOTION_ENABLED, enabled))
       }
+    }
+
+    AsyncFunction("setAudioEvaluationLoggingEnabled") { enabled: Boolean ->
+      val context = appContext.reactContext?.applicationContext
+        ?: throw IllegalStateException("Application context is unavailable.")
+      context.getSharedPreferences(CompanionMonitorService.PREFS, Context.MODE_PRIVATE)
+        .edit().putBoolean("audioEvaluationLogging", enabled).apply()
+    }
+
+    AsyncFunction("getAudioEvaluationCsv") {
+      val context = appContext.reactContext?.applicationContext
+        ?: throw IllegalStateException("Application context is unavailable.")
+      val file = File(context.filesDir, CompanionMonitorService.AUDIO_EVALUATION_FILENAME)
+      if (!file.exists()) "" else file.readText()
+    }
+
+    AsyncFunction("clearAudioEvaluationCsv") {
+      val context = appContext.reactContext?.applicationContext
+        ?: throw IllegalStateException("Application context is unavailable.")
+      context.getSharedPreferences(CompanionMonitorService.PREFS, Context.MODE_PRIVATE)
+        .edit().putInt("audioEvaluationRowsWritten", 0).apply()
+      File(context.filesDir, CompanionMonitorService.AUDIO_EVALUATION_FILENAME).delete()
     }
 
     AsyncFunction("triggerEmergency") { reason: String ->

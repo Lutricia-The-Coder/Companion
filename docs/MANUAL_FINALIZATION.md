@@ -76,17 +76,17 @@ Use two test accounts you control and add only the Resend account-owner address 
 
 These account-level tests require your logged-in Dashboard session and test accounts; this workspace cannot safely impersonate them or confirm production delivery.
 
-## 7. Evaluate the audio model (requires a code change and corpus)
+## 7. Evaluate the audio model (requires the final APK and a consented corpus)
 
-Do not describe YAMNet scream/shout detection as reliable until measured. The current service does not export every model window's scores, so alert history alone cannot produce valid precision, recall, or false-positive rates. A consent-gated score logging/export mode must be added before collecting evaluation predictions. This can be done during the upcoming phone test phase; it must not store raw audio. Then use a consented, labeled corpus containing distress and varied background audio and record device latency, memory and battery measurements. Keep personal recordings private; do not upload raw evidence to the app's emergency bucket for evaluation.
+Do not describe YAMNet scream/shout detection as reliable until measured. An opt-in Android prediction logger is now wired to Settings → Audio Model Evaluation. While an active journey has background audio monitoring enabled, it records only the per-window predicted class, confidence, timestamp, threshold, and inference latency. It does not store microphone samples or upload the CSV. The local log is capped at 20,000 rows or 4 MB. Export shares the first 200 data rows at a time through Android's text share sheet; clear the log between batches if you need to export later rows. Keep personal recordings private; do not upload raw evidence to the app's emergency bucket for evaluation. Only use corpus audio with appropriate consent.
 
-After that score-export mode exists, run the existing evaluator on a CSV with columns `actual,predicted,duration_seconds` and optional `latency_ms,memory_mb,battery_delta_percent`:
+After collecting predictions on the Honor X5c, fill the exported CSV's blank `actual` column with `distress` or `background` labels and preserve the remaining columns. The logged prediction is a per-window threshold result; it may differ from the multi-window automatic SOS policy. The current service uses a fixed 0.975-second duration per window. Add device memory and battery measurements separately if available. Then run the existing evaluator:
 
 ```powershell
 node scripts/evaluate-audio-metrics.mjs .\path\to\consented-predictions.csv
 ```
 
-It reports precision, recall, false negatives and false positives per background hour. The CSV evaluator is implemented and tested, but score export and a consented test corpus are not ready yet, so no model quality result can be reported now. Background custom-phrase recognition also remains unavailable; configured phrases currently use OS speech recognition while the app is foregrounded.
+It reports precision, recall, false negatives and false positives per background hour, plus latency summaries. No consented labeled corpus has been supplied or evaluated yet, so no model quality result can be reported. Background custom-phrase recognition also remains unavailable; configured phrases currently use OS speech recognition while the app is foregrounded.
 
 ## 8. Install and test on the Honor X5c — last
 

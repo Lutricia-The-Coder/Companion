@@ -27,6 +27,9 @@ declare class CompanionMonitorNative extends NativeModule<{
   confirmSafe(): Promise<void>;
   setBackgroundAudioEnabled(enabled: boolean): Promise<void>;
   setMotionMonitoringEnabled(enabled: boolean): Promise<void>;
+  setAudioEvaluationLoggingEnabled(enabled: boolean): Promise<void>;
+  getAudioEvaluationCsv(): Promise<string>;
+  clearAudioEvaluationCsv(): Promise<void>;
   getStatus(): Promise<{ running: boolean; lastSignal?: MonitorSignal | null; status?: string | null; emergencyPending?: boolean; audioMonitoring?: boolean; motionMonitoring?: boolean }>;
 }
 

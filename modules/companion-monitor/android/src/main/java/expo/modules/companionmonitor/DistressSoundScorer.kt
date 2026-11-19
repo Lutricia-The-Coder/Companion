@@ -7,10 +7,9 @@ internal class DistressSoundScorer(private val highThreshold: Float = 0.82f) {
   data class Decision(val kind: String, val confidence: Float, val activate: Boolean)
 
   fun score(scores: FloatArray): Decision? {
-    if (scores.size <= SCREAM_INDEX) return null
-    val candidate = DISTRESS_INDICES.maxByOrNull { scores[it].coerceIn(0f, 1f) } ?: return null
-    val confidence = scores[candidate].coerceIn(0f, 1f)
-    val kind = if (candidate == SCREAM_INDEX) "scream" else "shouting"
+    val prediction = prediction(scores) ?: return null
+    val confidence = prediction.second
+    val kind = prediction.first
     if (confidence >= highThreshold) {
       consecutiveHighWindows += 1
       if (consecutiveHighWindows >= 2) {
@@ -29,5 +28,13 @@ internal class DistressSoundScorer(private val highThreshold: Float = 0.82f) {
     const val SCREAM_INDEX = 11
     const val CHECK_IN_THRESHOLD = 0.58f
     val DISTRESS_INDICES = intArrayOf(6, 9, 10, SCREAM_INDEX)
+
+    fun prediction(scores: FloatArray): Pair<String, Float>? {
+      if (scores.size <= SCREAM_INDEX) return null
+      val candidate = DISTRESS_INDICES.maxByOrNull { scores[it].coerceIn(0f, 1f) } ?: return null
+      val confidence = scores[candidate].coerceIn(0f, 1f)
+      val kind = if (candidate == SCREAM_INDEX) "scream" else "shouting"
+      return kind to confidence
+    }
   }
 }

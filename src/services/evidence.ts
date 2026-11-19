@@ -154,11 +154,13 @@ async function removeExpiredLocalEvidence() {
 /** Retry queued evidence after an interrupted or offline upload. The same object ID is reused. */
 export async function uploadPendingEmergencyEvidence(options: {
   retryFailed?: boolean;
+  retryNow?: boolean;
   onStatus?: (message: string) => void;
 } = {}) {
-  if (outboxWorkerActive) return { uploaded: 0, pending: 0, failed: 0 };
+  if (outboxWorkerActive) return { uploaded: 0, pending: 0, failed: 0, errors: ['An evidence upload is already running.'] };
   outboxWorkerActive = true;
   let uploaded = 0;
+  const errors: string[] = [];
   try {
     await migrateLegacyAudioRecords();
     await removeExpiredLocalEvidence();
@@ -168,6 +170,12 @@ export async function uploadPendingEmergencyEvidence(options: {
       records = records.map((record) => record.uploadStatus === 'failed'
         ? { ...record, uploadAttempts: 0, nextUploadAt: undefined, uploadStatus: 'pending' }
         : record);
+      await writeOutbox(records);
+    }
+    if (options.retryNow) {
+      records = records.map((record) => record.uploadStatus === 'uploaded'
+        ? record
+        : { ...record, nextUploadAt: undefined });
       await writeOutbox(records);
     }
     for (const record of records) {
@@ -194,20 +202,22 @@ export async function uploadPendingEmergencyEvidence(options: {
           : item);
         uploaded++;
         options.onStatus?.(`${record.type === 'audio' ? 'Audio' : 'Video'} evidence uploaded to private storage.`);
-      } catch {
+      } catch (cause) {
+        const detail = cause instanceof Error ? cause.message : 'Unknown upload error.';
+        errors.push(`${record.type === 'audio' ? 'Audio' : 'Video'}: ${detail}`);
         if (nextAttempt >= MAX_UPLOAD_ATTEMPTS) {
           records = records.map((item) => item.evidenceId === record.evidenceId
             ? { ...item, uploadStatus: 'failed', nextUploadAt: undefined }
             : item);
         }
         options.onStatus?.(nextAttempt >= MAX_UPLOAD_ATTEMPTS
-          ? `${record.type === 'audio' ? 'Audio' : 'Video'} upload stopped after ${MAX_UPLOAD_ATTEMPTS} failures; the device copy remains available for manual retry.`
-          : `${record.type === 'audio' ? 'Audio' : 'Video'} evidence upload attempt ${nextAttempt} failed; it remains queued for retry.`);
+          ? `${record.type === 'audio' ? 'Audio' : 'Video'} upload stopped after ${MAX_UPLOAD_ATTEMPTS} failures; the device copy remains available for manual retry. ${detail}`
+          : `${record.type === 'audio' ? 'Audio' : 'Video'} evidence upload attempt ${nextAttempt} failed; it remains queued for retry. ${detail}`);
       }
       await writeOutbox(records);
     }
     const latest = await readOutbox();
-    return { uploaded, pending: latest.filter((item) => item.uploadStatus === 'pending').length, failed: latest.filter((item) => item.uploadStatus === 'failed').length };
+    return { uploaded, pending: latest.filter((item) => item.uploadStatus === 'pending').length, failed: latest.filter((item) => item.uploadStatus === 'failed').length, errors };
   } finally {
     outboxWorkerActive = false;
   }

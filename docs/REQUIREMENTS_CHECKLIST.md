@@ -4,7 +4,9 @@ This is the implementation ledger for the requirements supplied in this project 
 
 **Status key:** `[x]` implementation and the required verification are complete; `[~]` implementation exists but has a named gap or has not been verified; `[ ]` not implemented. I will only change an item to `[x]` after its completion criteria are met. Production changes, real alerts, and real emails are not part of local verification.
 
-## Current pass progress — 2026-11-18
+## Current pass progress — 2026-11-19
+
+- [~] Added an opt-in Android YAMNet prediction metadata log and CSV share/delete controls; no microphone samples are stored. Evaluation labels, consented corpus metrics, and Honor X5c latency/memory/battery measurements remain outstanding.
 
 - [~] Registration now supports up to eight trigger phrases with edit/remove, enable, and independent-activation controls. Encrypted storage is retained. Account/phone end-to-end flow still awaits the final device pass.
 - [~] Phrase recognition now chooses an installed offline English locale, waits for final transcripts, handles Android's omitted confidence as unknown rather than false zero, and applies low-score policy only to real scores. Honor X5c phrase recall still awaits the fresh APK and real speech.

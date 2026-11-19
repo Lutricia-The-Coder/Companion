@@ -25,6 +25,8 @@ import org.tensorflow.lite.Interpreter
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.io.File
+import java.util.Locale
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
@@ -67,6 +69,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
     when (intent?.action) {
       ACTION_STOP -> {
         clearPendingCheckIn()
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("audioEvaluationLogging", false).apply()
         stopMonitoring()
         stopSelf()
         return START_NOT_STICKY
@@ -256,8 +259,11 @@ class CompanionMonitorService : Service(), SensorEventListener {
     for (i in samples.indices) input[0][i] = samples[i] / 32768f
     val output = Array(1) { FloatArray(outputSize) }
     try {
+      val inferenceStartedAt = android.os.SystemClock.elapsedRealtimeNanos()
       interpreter?.run(input as Any, output as Any)
       val scores = output[0]
+      val inferenceLatencyMs = (android.os.SystemClock.elapsedRealtimeNanos() - inferenceStartedAt) / 1_000_000.0
+      recordAudioEvaluationWindow(scores, System.currentTimeMillis(), inferenceLatencyMs)
       // YAMNet AudioSet class-map indices: Shout 6, Yell 9, Children shouting 10, Screaming 11.
       val decision = soundScorer.score(scores) ?: return
       val now = System.currentTimeMillis()
@@ -274,6 +280,31 @@ class CompanionMonitorService : Service(), SensorEventListener {
       publishStatus("Distress sound inference failed: ${error.message ?: "model error"}")
       scheduleAudioRetry()
       audioMonitoring = false
+    }
+  }
+
+  /** Opt-in prediction metadata only. Raw microphone samples are never written to this log. */
+  private fun recordAudioEvaluationWindow(scores: FloatArray, timestamp: Long, latencyMs: Double) {
+    val preferences = getSharedPreferences(PREFS, MODE_PRIVATE)
+    if (!preferences.getBoolean("audioEvaluationLogging", false)) return
+    val prediction = DistressSoundScorer.prediction(scores) ?: return
+    val file = File(filesDir, AUDIO_EVALUATION_FILENAME)
+    var rowCount = preferences.getInt("audioEvaluationRowsWritten", 0)
+    if (rowCount >= MAX_AUDIO_EVALUATION_ROWS || file.length() >= MAX_AUDIO_EVALUATION_BYTES) return
+    try {
+      if (!file.exists() || file.length() == 0L) {
+        file.writeText("actual,predicted,duration_seconds,latency_ms,timestamp_ms,class_label,confidence,threshold\n")
+        rowCount = 0
+      }
+      val predicted = if (prediction.second >= screamThreshold) "distress" else "background"
+      val confidence = String.format(Locale.US, "%.6f", prediction.second)
+      val latency = String.format(Locale.US, "%.3f", latencyMs)
+      val threshold = String.format(Locale.US, "%.4f", screamThreshold)
+      file.appendText(",${predicted},0.975,${latency},${timestamp},${prediction.first},${confidence},${threshold}\n")
+      preferences.edit().putInt("audioEvaluationRowsWritten", rowCount + 1).apply()
+    } catch (error: Exception) {
+      publishStatus("Audio evaluation log could not be written: ${error.message ?: "storage unavailable"}")
+      preferences.edit().putBoolean("audioEvaluationLogging", false).apply()
     }
   }
 
@@ -589,6 +620,9 @@ class CompanionMonitorService : Service(), SensorEventListener {
 
   companion object {
     const val PREFS = "companion_native_monitor"
+    const val AUDIO_EVALUATION_FILENAME = "companion-audio-evaluation.csv"
+    const val MAX_AUDIO_EVALUATION_ROWS = 20_000
+    const val MAX_AUDIO_EVALUATION_BYTES = 4L * 1024L * 1024L
     const val ACTION_START = "expo.modules.companionmonitor.START"
     const val ACTION_STOP = "expo.modules.companionmonitor.STOP"
     const val ACTION_TRIGGER_EMERGENCY = "expo.modules.companionmonitor.TRIGGER_EMERGENCY"

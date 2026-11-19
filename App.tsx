@@ -33,6 +33,7 @@ import {
   PermissionsAndroid,
   Platform,
   SafeAreaView,
+  Share,
   ScrollView,
   StatusBar as NativeStatusBar,
   StyleSheet,
@@ -145,6 +146,8 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
   const [pendingCheckIn, setPendingCheckIn] = useState<{ reason: string; deadline: number } | null>(null);
   const [checkInSeconds, setCheckInSeconds] = useState(0);
   const [nativeMonitorStatus, setNativeMonitorStatus] = useState('');
+  const [audioEvaluationLogging, setAudioEvaluationLogging] = useState(false);
+  const [audioEvaluationStatus, setAudioEvaluationStatus] = useState('Prediction logging is off');
   const [notificationPermissionStatus, setNotificationPermissionStatus] = useState('');
   const [speechRetryToken, setSpeechRetryToken] = useState(0);
   const [destination, setDestination] = useState('');
@@ -245,6 +248,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
         'companion-motion-enabled',
         'companion-phrase-monitor-enabled',
         'companion-share-journey-default',
+        'companion-audio-evaluation-logging',
         ROUTE_DEVIATION_THRESHOLD_KEY,
         'companion-emergency-event-id',
       ]);
@@ -256,6 +260,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
       if (values['companion-motion-enabled'] === 'false') setMotionMonitoringAllowed(false);
       if (values['companion-phrase-monitor-enabled'] === 'false') setPhraseMonitoringAllowed(false);
       if (values['companion-share-journey-default'] === 'true') setShareEachJourney(true);
+      if (values['companion-audio-evaluation-logging'] === 'true') setAudioEvaluationLogging(true);
       const savedThreshold = Number(values[ROUTE_DEVIATION_THRESHOLD_KEY]);
       if (Number.isFinite(savedThreshold) && savedThreshold >= 50 && savedThreshold <= 500) setRouteDeviationThreshold(savedThreshold);
       if (values['companion-emergency-event-id']) {
@@ -622,6 +627,53 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
   }, [active, backgroundAudioAllowed, emergencyMode]);
 
   useEffect(() => {
+    if (Platform.OS !== 'android' || !CompanionMonitor) return;
+    void CompanionMonitor.setAudioEvaluationLoggingEnabled(active && audioEvaluationLogging)
+      .then(() => setAudioEvaluationStatus(active && audioEvaluationLogging
+        ? 'Recording prediction metadata for this active journey; microphone audio is not saved.'
+        : 'Prediction logging is off'))
+      .catch(() => setAudioEvaluationStatus('Could not update the Android evaluation logging setting'));
+  }, [active, audioEvaluationLogging]);
+
+  const exportAudioEvaluationCsv = useCallback(async () => {
+    if (Platform.OS !== 'android' || !CompanionMonitor) {
+      Alert.alert('Android only', 'The YAMNet background prediction log is available in the Android app.');
+      return;
+    }
+    try {
+      const csv = await CompanionMonitor.getAudioEvaluationCsv();
+      const lines = csv.trim().split(/\r?\n/);
+      if (lines.length < 2) {
+        Alert.alert('No predictions yet', 'Enable prediction logging, then run an active journey with background sound monitoring enabled.');
+        return;
+      }
+      const shareCsv = [lines[0], ...lines.slice(1, 201)].join('\n');
+      const omitted = Math.max(0, lines.length - 201);
+      await Share.share({
+        title: 'Companion audio evaluation CSV',
+        message: shareCsv,
+      }, { dialogTitle: 'Export audio evaluation predictions' });
+      setAudioEvaluationStatus(`Shared ${Math.min(lines.length - 1, 200)} prediction rows${omitted ? `; ${omitted} later rows were omitted` : ''}. No raw audio is included. Fill the blank actual column before evaluation.`);
+    } catch {
+      setAudioEvaluationStatus('Could not export the audio evaluation predictions');
+      Alert.alert('Export failed', 'Android could not open the share sheet for the prediction CSV.');
+    }
+  }, []);
+
+  const clearAudioEvaluationCsv = useCallback(() => {
+    const monitor = CompanionMonitor;
+    if (!monitor) return;
+    Alert.alert('Delete evaluation predictions?', 'This removes the locally stored prediction metadata from this device. Microphone audio is never stored in this log.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => {
+        void monitor.clearAudioEvaluationCsv()
+          .then(() => setAudioEvaluationStatus('Local prediction log deleted'))
+          .catch(() => setAudioEvaluationStatus('Could not delete the local prediction log'));
+      } },
+    ]);
+  }, []);
+
+  useEffect(() => {
     if (!active || !journeyId || Platform.OS !== 'android' || !CompanionMonitor) return;
     let cancelled = false;
     const signalSubscription = CompanionMonitor.addListener('onDistressSignal', (signal) => {
@@ -917,6 +969,21 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
                 void AsyncStorage.setItem(ROUTE_DEVIATION_THRESHOLD_KEY, String(meters));
               }} accessibilityRole="radio" accessibilityState={{ selected: routeDeviationThreshold === meters }}><Text style={[styles.thresholdOptionText, routeDeviationThreshold === meters && styles.thresholdOptionTextSelected]}>{meters} m</Text></TouchableOpacity>)}</View>
               <Text style={styles.helper}>Personal phrases are recognized only while Companion is foregrounded. Background service detects sounds and motion separately. Turning off a monitor keeps location tracking enabled.</Text>
+            </View>
+            <View style={styles.inputCard}>
+              <Text style={styles.cardLabel}>AUDIO MODEL EVALUATION</Text>
+              <Text style={styles.helper}>Optional and Android only. While a journey and background audio monitoring are active, save YAMNet prediction metadata (label, confidence, timestamp, and model latency) for a consented evaluation. Companion never saves microphone audio in this log and does not upload it. Do not record around people who have not consented.</Text>
+              <View style={styles.statusRow}>
+                <Text style={[styles.helper, { flex: 1, marginTop: 0 }]}>Log prediction metadata during active journeys.</Text>
+                <Switch value={audioEvaluationLogging} disabled={Platform.OS !== 'android' || !CompanionMonitor} onValueChange={(value) => {
+                  setAudioEvaluationLogging(value);
+                  void AsyncStorage.setItem('companion-audio-evaluation-logging', String(value));
+                }} accessibilityLabel="Opt in to local audio model prediction logging" />
+              </View>
+              <Text style={styles.helper}>{Platform.OS === 'android' ? audioEvaluationStatus : 'Available only in the Android native build.'}</Text>
+              <Text style={styles.helper}>The exported CSV has an empty actual column for manual labeling. Per-window threshold predictions are for evaluation and may differ from the multi-window SOS activation policy.</Text>
+              <TouchableOpacity style={styles.secondaryButton} disabled={Platform.OS !== 'android' || !CompanionMonitor} onPress={() => void exportAudioEvaluationCsv()}><Text style={styles.secondaryText}>Export prediction CSV</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.secondaryButton} disabled={Platform.OS !== 'android' || !CompanionMonitor} onPress={clearAudioEvaluationCsv}><Text style={styles.secondaryText}>Delete local prediction log</Text></TouchableOpacity>
             </View>
             <View style={styles.inputCard}>
               <Text style={styles.cardLabel}>EMERGENCY AUDIO EVIDENCE</Text>

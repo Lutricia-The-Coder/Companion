@@ -1,0 +1,12 @@
+Error while reading cache, falling back to a full crawl:
+ Error: Unable to deserialize cloned data.
+    at deserialize (node:v8:469:14)
+    at DiskCacheManager.read (C:\Users\LCX\Documents\ChatGPT\WilProject\node_modules\@expo\metro-file-map\build\cache\DiskCacheManager.js:95:42)
+    at async FileMap.read (C:\Users\LCX\Documents\ChatGPT\WilProject\node_modules\@expo\metro-file-map\build\index.js:447:20)
+    at async C:\Users\LCX\Documents\ChatGPT\WilProject\node_modules\@expo\metro-file-map\build\index.js:330:35
+    at async DependencyGraph.ready (C:\Users\LCX\Documents\ChatGPT\WilProject\node_modules\@expo\metro\node_modules\metro\src\node-haste\DependencyGraph.js:95:5)
+    at async Bundler.ready (C:\Users\LCX\Documents\ChatGPT\WilProject\node_modules\@expo\metro\node_modules\metro\src\Bundler.js:62:5)
+    at async IncrementalBundler.ready (C:\Users\LCX\Documents\ChatGPT\WilProject\node_modules\@expo\metro\node_modules\metro\src\IncrementalBundler.js:310:5)
+    at async Server.ready (C:\Users\LCX\Documents\ChatGPT\WilProject\node_modules\@expo\metro\node_modules\metro\src\Server.js:1465:5)
+    at async runMetro (C:\Users\LCX\Documents\ChatGPT\WilProject\node_modules\@expo\metro\node_modules\metro\src\index.flow.js:150:5)
+    at async createConnectMiddleware (C:\Users\LCX\Documents\ChatGPT\WilProject\node_modules\@expo\metro\node_modules\metro\src\index.flow.js:155:23)

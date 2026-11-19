@@ -1,0 +1,24 @@
+env: load .env
+env: export EXPO_PUBLIC_COMPANION_DASHBOARD_URL EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY EXPO_PUBLIC_SUPABASE_URL
+Starting project at C:\Users\LCX\Documents\ChatGPT\WilProject
+Starting Metro Bundler
+
+Waiting on http://localhost:8081
+
+An update for expo is available: 58.0.25 → ~58.0.26
+3 other packages may need updating. Run npx expo install --check for details.
+Logs for your project will appear below.
+| (node:13392) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+| (Use `node --trace-warnings ...` to show where the warning was created)
+| (node:13392) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+| (Use `node --trace-warnings ...` to show where the warning was created)
+| (node:13392) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+| (Use `node --trace-warnings ...` to show where the warning was created)
+| (node:13392) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+| (Use `node --trace-warnings ...` to show where the warning was created)
+| (node:13392) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+| (Use `node --trace-warnings ...` to show where the warning was created)
+| (node:13392) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+| (Use `node --trace-warnings ...` to show where the warning was created)
+Android Bundled 5198ms node_modules\expo-router\entry.js (1514 modules)
+Android Bundled 24231ms index.ts (1492 modules)
