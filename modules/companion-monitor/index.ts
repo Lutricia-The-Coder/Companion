@@ -1,10 +1,24 @@
 import { NativeModule, requireOptionalNativeModule } from 'expo';
 
 export type MonitorSignal = {
-  kind: 'scream' | 'shouting' | 'fall';
+  kind: 'scream' | 'shouting' | 'distress_vocalization' | 'fall';
   confidence: number;
   timestamp: number;
   signalId: string;
+};
+
+export type MonitorStatus = {
+  running: boolean;
+  lastSignal?: MonitorSignal | null;
+  status?: string | null;
+  emergencyPending?: boolean;
+  audioMonitoring?: boolean;
+  motionMonitoring?: boolean;
+  audioEvaluationLogging?: boolean;
+  audioEvaluationRowsWritten?: number;
+  audioEvaluationLogBytes?: number;
+  audioEvaluationLimitReached?: boolean;
+  audioEvaluationLastTimestampMs?: number | null;
 };
 
 declare class CompanionMonitorNative extends NativeModule<{
@@ -30,7 +44,7 @@ declare class CompanionMonitorNative extends NativeModule<{
   setAudioEvaluationLoggingEnabled(enabled: boolean): Promise<void>;
   getAudioEvaluationCsv(): Promise<string>;
   clearAudioEvaluationCsv(): Promise<void>;
-  getStatus(): Promise<{ running: boolean; lastSignal?: MonitorSignal | null; status?: string | null; emergencyPending?: boolean; audioMonitoring?: boolean; motionMonitoring?: boolean }>;
+  getStatus(): Promise<MonitorStatus>;
 }
 
 export default requireOptionalNativeModule<CompanionMonitorNative>('CompanionMonitor');

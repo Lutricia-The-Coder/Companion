@@ -21,6 +21,29 @@ test('personal SOS phrase can independently activate an emergency', () => {
   assert.equal(engine.state, 'EMERGENCY_ACTIVATED');
 });
 
+test('decision history records reasons and the signal context without retaining transcripts', () => {
+  const engine = new SafetyDecisionEngine();
+  engine.startJourney();
+  engine.observe({ kind: 'scream', confidence: 0.97, timestamp: 10_000, signalId: 'audio-1' });
+  engine.tick(22_000);
+  const history = engine.getDecisionHistory();
+  assert.deepEqual(history.map((item) => item.decision), ['monitoring_started', 'check_in_requested', 'emergency_activated']);
+  assert.match(history[2].reason, /did not respond/);
+  assert.deepEqual(history[2].signals.map(({ kind, signalId }) => ({ kind, signalId })), [{ kind: 'scream', signalId: 'audio-1' }]);
+  assert.equal(JSON.stringify(history).includes('transcript'), false);
+  history[2].signals[0].kind = 'private_phrase';
+  assert.equal(engine.getDecisionHistory()[2].signals[0].kind, 'scream');
+});
+
+test('manual SOS enters the same state machine and is deduplicated', () => {
+  const engine = new SafetyDecisionEngine();
+  engine.startJourney();
+  const first = engine.activateManually('User pressed SOS', 2_000);
+  assert.ok(actionTypes(first).includes('activate_emergency'));
+  assert.deepEqual(engine.activateManually('Repeated SOS', 2_100), []);
+  assert.equal(engine.getDecisionHistory().filter(({ decision }) => decision === 'emergency_activated').length, 1);
+});
+
 test('phrase match follows configured non-independent behavior', () => {
   const engine = new SafetyDecisionEngine({ independentPhraseEnabled: false });
   engine.startJourney();
@@ -36,6 +59,20 @@ test('high-confidence fall and scream together activate immediately', () => {
   const actions = engine.observe({ kind: 'scream', confidence: 0.96, timestamp: 2000, signalId: 'scream-1' });
   assert.ok(actionTypes(actions).includes('activate_emergency'));
   assert.equal(engine.state, 'EMERGENCY_ACTIVATED');
+});
+
+test('crying vocalization asks for a check-in alone and combines with a high-confidence fall', () => {
+  const alone = new SafetyDecisionEngine();
+  alone.startJourney();
+  const checkIn = alone.observe({ kind: 'distress_vocalization', confidence: 0.96, timestamp: 1000, signalId: 'cry-1' });
+  assert.ok(actionTypes(checkIn).includes('request_check_in'));
+  assert.ok(!actionTypes(checkIn).includes('activate_emergency'));
+
+  const combined = new SafetyDecisionEngine();
+  combined.startJourney();
+  combined.observe({ kind: 'fall', confidence: 0.97, timestamp: 1000, signalId: 'fall-cry-1' });
+  const actions = combined.observe({ kind: 'distress_vocalization', confidence: 0.96, timestamp: 2000, signalId: 'cry-2' });
+  assert.ok(actionTypes(actions).includes('activate_emergency'));
 });
 
 test('single high sound asks for check-in before escalating', () => {
@@ -93,6 +130,16 @@ test('expired evidence is not combined with a later signal', () => {
   const actions = engine.observe({ kind: 'scream', confidence: 0.8, timestamp: 3000 });
   assert.equal(engine.state, 'MONITORING');
   assert.ok(!actionTypes(actions).includes('activate_emergency'));
+});
+
+test('very old out-of-order evidence cannot erase or combine with the current context', () => {
+  const engine = new SafetyDecisionEngine({ evidenceWindowMs: 1000 });
+  engine.startJourney();
+  engine.observe({ kind: 'fall', confidence: 0.8, timestamp: 10_000, signalId: 'recent-fall' });
+  const stale = engine.observe({ kind: 'scream', confidence: 0.99, timestamp: 1_000, signalId: 'stale-scream' });
+  assert.deepEqual(stale, []);
+  assert.equal(engine.state, 'MONITORING');
+  assert.equal(engine.getDecisionHistory().some(({ signals }) => signals.some(({ signalId }) => signalId === 'stale-scream')), false);
 });
 
 test('personal trigger matching normalizes punctuation and matches phrase boundaries', () => {

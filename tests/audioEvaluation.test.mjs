@@ -1,6 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluateAudioCsv, evaluateAudioRows } from '../scripts/evaluate-audio-metrics.mjs';
+import { selectLatestAudioEvaluationRows } from '../src/services/audioEvaluationCsv.ts';
+
+test('audio evaluation export keeps the header and includes the newest prediction rows', () => {
+  const rows = Array.from({ length: 205 }, (_, index) => `,background,0.975,1,${index},scream,0.1,0.82`);
+  const result = selectLatestAudioEvaluationRows(['actual,predicted,duration_seconds,latency_ms,timestamp_ms,class_label,confidence,threshold', ...rows].join('\n'));
+  const exported = result.csv.split('\n');
+  assert.equal(exported[0].startsWith('actual,predicted'), true);
+  assert.equal(result.sharedRows, 200);
+  assert.equal(result.omittedRows, 5);
+  assert.equal(exported[1].split(',')[4], '5');
+  assert.equal(exported.at(-1).split(',')[4], '204');
+});
+
+test('audio evaluation export returns an empty result when the CSV has no prediction rows', () => {
+  assert.deepEqual(selectLatestAudioEvaluationRows('actual,predicted\n'), { csv: '', sharedRows: 0, omittedRows: 0 });
+});
 
 test('audio evaluation reports confusion matrix, rates, and runtime summary', () => {
   const result = evaluateAudioRows([

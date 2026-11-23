@@ -1,6 +1,7 @@
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getPrivateItem, setPrivateItem } from './privateStorage';
 import { publishLatestLocation } from './locationPublishing';
 import { isRouteDeviation, parseRouteCoordinates, shouldAcceptLocationUpdate, type Coordinate, type TimestampedLocation } from './routeSafety';
 import { reportRouteDeviation } from './sharing';
@@ -28,29 +29,29 @@ TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
   };
   if (typeof point.accuracy !== 'number' || !Number.isFinite(point.accuracy)) return;
   const validPoint: TimestampedLocation = { ...point, accuracy: point.accuracy };
-  const storedPoint = await AsyncStorage.getItem(LAST_LOCATION_KEY);
+  const storedPoint = await getPrivateItem(LAST_LOCATION_KEY);
   let previous: TimestampedLocation | null = null;
   if (storedPoint) {
     try { previous = JSON.parse(storedPoint) as TimestampedLocation; }
     catch { previous = null; }
   }
   if (!shouldAcceptLocationUpdate(validPoint, previous, { maxAccuracyMeters: 100, now: Date.now(), maxAgeMs: 30_000 })) return;
-  await AsyncStorage.setItem(LAST_LOCATION_KEY, JSON.stringify(validPoint));
+  await setPrivateItem(LAST_LOCATION_KEY, JSON.stringify(validPoint)).catch(() => undefined);
   const journeyId = await AsyncStorage.getItem('companion-active-journey-id');
   if (journeyId) {
     await publishLatestLocation(journeyId, validPoint);
 
     try {
-      const savedRoute = await AsyncStorage.getItem(ACTIVE_ROUTE_KEY);
+      const savedRoute = await getPrivateItem(ACTIVE_ROUTE_KEY);
       if (savedRoute) {
         const route = parseRouteCoordinates(JSON.parse(savedRoute));
         if (route.length > 0) {
           let origin: Coordinate | null = null;
-          const savedOrigin = await AsyncStorage.getItem(ROUTE_ORIGIN_KEY);
+          const savedOrigin = await getPrivateItem(ROUTE_ORIGIN_KEY);
           if (savedOrigin) origin = JSON.parse(savedOrigin) as Coordinate;
           if (!origin) {
             origin = { latitude: point.latitude, longitude: point.longitude };
-            await AsyncStorage.setItem(ROUTE_ORIGIN_KEY, JSON.stringify(origin));
+            await setPrivateItem(ROUTE_ORIGIN_KEY, JSON.stringify(origin));
           }
           const configuredThreshold = Number(await AsyncStorage.getItem(ROUTE_DEVIATION_THRESHOLD_KEY));
           const thresholdMeters = Number.isFinite(configuredThreshold) && configuredThreshold >= 50 && configuredThreshold <= 500

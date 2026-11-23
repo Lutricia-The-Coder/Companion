@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useAudioPlayer } from 'expo-audio';
-import { ActivityIndicator, Alert, Linking, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Linking, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { supabase, supabaseReady } from '../lib/supabase';
 import { deleteEmergencyEvidence, deleteLocalEmergencyEvidence, loadEvidenceOutbox, requestEvidenceDownload, uploadPendingEmergencyEvidence, type EvidenceOutboxRecord } from '../services/evidence';
+import { theme } from '../theme';
 
 type EmergencyHistoryItem = {
   eventId: string;
@@ -15,16 +16,26 @@ type EmergencyHistoryItem = {
   notificationStatus?: string;
   accepted?: number;
   failures?: number;
+  unknown?: number;
   evidence?: EvidenceRecord[];
 };
 
-type EvidenceRecord = { evidenceId: string; type: 'audio' | 'video'; expiresAt?: number; durationSeconds?: number };
-type StoredEvidence = { id: string; media_type: 'audio' | 'video'; expires_at?: number; duration_seconds?: number };
+type JourneyHistoryItem = {
+  journeyId: string;
+  destination?: string;
+  status: string;
+  startedAt?: number;
+  endedAt?: number;
+  events: EmergencyHistoryItem[];
+};
 
-const C = { bg: '#F7F7F6', panel: '#F0F0EF', ink: '#151515', muted: '#707070', teal: '#D52B37', line: '#E3E3E2', red: '#D52B37' };
+type EvidenceRecord = { evidenceId: string; type: 'audio' | 'video'; recordedAt?: number; expiresAt?: number; durationSeconds?: number };
+type StoredEvidence = { id: string; media_type: 'audio' | 'video'; recorded_at?: number; expires_at?: number; duration_seconds?: number };
+
+const C = { bg: theme.background, panel: theme.surface, ink: theme.ink, muted: theme.muted, teal: theme.navy, line: theme.line, red: theme.red };
 
 export default function EmergencyHistory() {
-  const [items, setItems] = useState<EmergencyHistoryItem[]>([]);
+  const [journeys, setJourneys] = useState<JourneyHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [reload, setReload] = useState(0);
@@ -39,7 +50,7 @@ export default function EmergencyHistory() {
 
   const load = useCallback(async () => {
     if (!supabaseReady || !supabase) {
-      setItems([]);
+      setJourneys([]);
       setLoading(false);
       return;
     }
@@ -47,30 +58,39 @@ export default function EmergencyHistory() {
     setError('');
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) { setItems([]); return; }
+      if (!user) { setJourneys([]); return; }
       const { data, error: queryError } = await supabase.from('journeys').select(
-        'id,destination,safety_events(id,event_type,status,reason,activated_at,notifications,evidence(id,media_type,expires_at,duration_seconds))',
-      ).eq('owner_id', user.id).order('started_at', { ascending: false }).limit(100);
+        'id,destination,status,started_at,ended_at,safety_events(id,event_type,status,reason,activated_at,notifications,evidence(id,media_type,recorded_at,expires_at,duration_seconds))',
+      ).eq('owner_id', user.id).eq('status', 'ended').order('started_at', { ascending: false }).limit(100);
       if (queryError) throw queryError;
-      const history = (data ?? []).flatMap((journey) => (journey.safety_events ?? []).map((event: any) => ({
-        eventId: event.id,
+      const history = (data ?? []).map((journey) => ({
         journeyId: journey.id,
-        type: event.event_type,
-        destination: journey.destination,
-        activatedAt: Number(event.activated_at) || undefined,
-        reason: event.reason || 'Safety alert',
-        status: event.status || 'unknown',
-        notificationStatus: event.notifications?.status,
-        accepted: Number(event.notifications?.accepted) || 0,
-        failures: Number(event.notifications?.failures) || 0,
-        evidence: (event.evidence ?? []).map((item: StoredEvidence) => ({
-          evidenceId: item.id,
-          type: item.media_type,
-          expiresAt: Number(item.expires_at) || undefined,
-          durationSeconds: item.duration_seconds,
-        })),
-      }))).sort((a, b) => (b.activatedAt ?? 0) - (a.activatedAt ?? 0));
-      setItems(history);
+        destination: journey.destination ?? undefined,
+        status: journey.status ?? 'unknown',
+        startedAt: Number(journey.started_at) || undefined,
+        endedAt: Number(journey.ended_at) || undefined,
+        events: (journey.safety_events ?? []).map((event: any) => ({
+          eventId: event.id,
+          journeyId: journey.id,
+          type: event.event_type,
+          destination: journey.destination,
+          activatedAt: Number(event.activated_at) || undefined,
+          reason: event.reason || 'Safety alert',
+          status: event.status || 'unknown',
+          notificationStatus: event.notifications?.status,
+          accepted: Number(event.notifications?.accepted) || 0,
+          failures: Number(event.notifications?.failures) || 0,
+          unknown: Number(event.notifications?.unknown) || 0,
+          evidence: (event.evidence ?? []).map((item: StoredEvidence) => ({
+            evidenceId: item.id,
+            type: item.media_type,
+            recordedAt: Number(item.recorded_at) || undefined,
+            expiresAt: Number(item.expires_at) || undefined,
+            durationSeconds: item.duration_seconds,
+          })),
+        })).sort((a, b) => (b.activatedAt ?? 0) - (a.activatedAt ?? 0)),
+      }));
+      setJourneys(history);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not load emergency history.');
     } finally {
@@ -85,24 +105,33 @@ export default function EmergencyHistory() {
 
   return <View style={s.wrap}>
     <Text style={s.eyebrow}>YOUR ACCOUNT</Text>
-    <Text style={s.title}>Emergency history</Text>
-    <Text style={s.subtitle}>Provider acceptance is shown separately from delivery confirmation.</Text>
+    <Text style={s.title}>Journey history</Text>
+    <Text style={s.subtitle}>Your past journeys, in one place.</Text>
     <TouchableOpacity style={s.refresh} onPress={() => setReload((value) => value + 1)} accessibilityRole="button"><Text style={s.refreshText}>Refresh history</Text></TouchableOpacity>
-    {loading ? <View style={s.state}><ActivityIndicator color={C.teal} /><Text style={s.stateText}>Loading events…</Text></View>
+    {loading ? <View style={s.state}><ActivityIndicator color={C.teal} /><Text style={s.stateText}>Loading journey history…</Text></View>
       : error ? <View style={s.state}><Text style={s.error}>{error}</Text></View>
-        : items.length === 0 ? <View style={s.state}><Text style={s.stateText}>No emergency events are recorded on this account.</Text></View>
-          : <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>{items.map((item) => <View key={`${item.journeyId}-${item.eventId}`} style={s.card}>
-            <View style={s.cardTop}><Text style={s.cardTitle}>{item.type === 'route_deviation' ? 'Route deviation alert' : item.status === 'activating' ? 'Emergency activating' : 'Emergency activated'}</Text><Text style={s.date}>{item.activatedAt ? new Date(item.activatedAt).toLocaleString() : 'Time unavailable'}</Text></View>
-            <Text style={s.reason}>{item.reason}</Text>
-            {item.destination ? <Text style={s.meta}>Journey to {item.destination}</Text> : null}
-            <View style={s.divider} />
-            <Text style={s.meta}>Message status: {item.notificationStatus ?? 'pending or not available'}</Text>
-            {item.notificationStatus ? <Text style={s.meta}>Provider accepted: {item.accepted ?? 0} · failed: {item.failures ?? 0}</Text> : null}
-            {item.evidence?.map((record) => <RemoteEvidence key={record.evidenceId} journeyId={item.journeyId} eventId={item.eventId} evidence={record} onDeleted={() => setReload((value) => value + 1)} />)}
-          </View>)}</ScrollView>}
+        : journeys.length === 0 ? <View style={s.state}><Text style={s.stateText}>No journeys have been recorded on this account.</Text></View>
+          : <>
+          <View style={s.summaryCard}><Text style={s.summaryLabel}>YOUR JOURNEY RECORD</Text><Text style={s.summaryCount}>{journeys.length} completed journey{journeys.length === 1 ? '' : 's'}</Text></View>
+          <Text style={s.sectionHeading}>RECENT JOURNEYS</Text>
+          {journeys.map((journey) => <View key={journey.journeyId} style={s.journeyCard}>
+            <View style={s.journeyTop}><Text style={s.date}>{journey.startedAt ? new Date(journey.startedAt).toLocaleString() : 'Start time unavailable'}</Text><View style={s.completedBadge}><Text style={s.completedText}>COMPLETED</Text></View></View>
+            <Text style={s.journeyTitle}>{journey.destination || 'Safety journey'}</Text>
+            <Text style={s.meta}>{journey.startedAt && journey.endedAt && journey.endedAt >= journey.startedAt ? `${Math.max(1, Math.round((journey.endedAt - journey.startedAt) / 60_000))} min` : 'Duration unavailable'} · {journey.events.length ? `${journey.events.length} safety event${journey.events.length === 1 ? '' : 's'}` : 'No safety alerts'}</Text>
+            {journey.events.map((item) => <View key={item.eventId} style={s.eventCard}>
+              <View style={s.cardTop}><Text style={s.cardTitle}>{item.type === 'route_deviation' ? 'Route deviation alert' : item.status === 'activating' ? 'Emergency activating' : 'Emergency activated'}</Text><Text style={s.date}>{item.activatedAt ? new Date(item.activatedAt).toLocaleString() : 'Time unavailable'}</Text></View>
+              <Text style={s.reason}>{item.reason}</Text>
+              <View style={s.divider} />
+              <Text style={s.meta}>Message status: {item.notificationStatus ?? 'pending or not available'}</Text>
+              {item.notificationStatus ? <Text style={s.meta}>Provider accepted: {item.accepted ?? 0} · failed: {item.failures ?? 0} · unknown: {item.unknown ?? 0}</Text> : null}
+              {item.evidence?.map((record) => <RemoteEvidence key={record.evidenceId} journeyId={item.journeyId} eventId={item.eventId} evidence={record} onDeleted={() => setReload((value) => value + 1)} />)}
+            </View>)}
+          </View>)}
+          <Text style={s.meta}>Only completed journeys appear in your history.</Text>
+          </>}
     {evidence.length > 0 ? <View style={s.evidenceSection}>
       <Text style={s.evidenceHeading}>Evidence on this device</Text>
-      <Text style={s.meta}>Local files expire after 30 days. Uploaded files stay in private storage and are visible only to authorized journey viewers until their server expiry.</Text>
+      <Text style={s.meta}>Local files are removed at their selected retention deadline. Uploaded files stay in private storage and are available only to authorized journey viewers until server expiry.</Text>
       {evidence.some((item) => item.uploadStatus !== 'uploaded') ? <TouchableOpacity style={s.refresh} disabled={retryingUploads} onPress={() => {
         setRetryingUploads(true);
         void uploadPendingEmergencyEvidence({ retryFailed: true, retryNow: true }).then(async (result) => {
@@ -161,7 +190,7 @@ function RemoteEvidence({ journeyId, eventId, evidence, onDeleted }: {
     } },
   ]);
   return <View style={s.evidenceRow}>
-    <Text style={s.meta}>{evidence.type === 'video' ? 'Video' : 'Audio'} evidence · {evidence.durationSeconds ?? 20}s{evidence.expiresAt ? ` · expires ${new Date(evidence.expiresAt).toLocaleDateString()}` : ''}</Text>
+    <Text style={s.meta}>{evidence.type === 'video' ? 'Video' : 'Audio'} evidence · {evidence.recordedAt ? `recorded ${new Date(evidence.recordedAt).toLocaleString()} · ` : ''}{evidence.durationSeconds ?? 20}s{evidence.expiresAt ? ` · expires ${new Date(evidence.expiresAt).toLocaleDateString()}` : ''}</Text>
     <View style={s.evidenceActions}>
       <TouchableOpacity style={s.refresh} disabled={busy} onPress={() => void download()}><Text style={s.refreshText}>{busy ? 'Working…' : 'Open evidence'}</Text></TouchableOpacity>
       <TouchableOpacity style={s.refresh} disabled={busy} onPress={remove}><Text style={s.deleteText}>Delete</Text></TouchableOpacity>
@@ -170,11 +199,12 @@ function RemoteEvidence({ journeyId, eventId, evidence, onDeleted }: {
 }
 
 const s = StyleSheet.create({
-  wrap: { flex: 1, paddingTop: 8 }, eyebrow: { color: C.teal, fontSize: 10, fontWeight: '800', letterSpacing: 1.7 },
-  title: { color: C.ink, fontSize: 30, lineHeight: 36, fontWeight: '700', marginTop: 12 }, subtitle: { color: C.muted, fontSize: 12, lineHeight: 18, marginTop: 8 },
+  wrap: { paddingTop: 8 }, eyebrow: { color: C.teal, fontSize: 10, fontWeight: '800', letterSpacing: 1.7 },
+  title: { color: C.ink, fontSize: 27, lineHeight: 34, fontWeight: '700', marginTop: 12 }, subtitle: { color: C.muted, fontSize: 13, lineHeight: 19, marginTop: 8 },
   refresh: { alignSelf: 'flex-start', paddingHorizontal: 13, paddingVertical: 10, borderColor: C.line, borderWidth: 1, borderRadius: 10, marginTop: 15 }, refreshText: { color: C.teal, fontWeight: '700', fontSize: 11 },
   state: { minHeight: 180, justifyContent: 'center', alignItems: 'center', padding: 20 }, stateText: { color: C.muted, fontSize: 12, textAlign: 'center', lineHeight: 18, marginTop: 10 }, error: { color: C.red, textAlign: 'center', fontSize: 12, lineHeight: 18 },
   evidenceSection: { marginTop: 20 }, evidenceHeading: { color: C.ink, fontSize: 15, fontWeight: '700', marginBottom: 8 },
   evidenceRow: { marginTop: 8 }, evidenceActions: { flexDirection: 'row', gap: 8 }, deleteText: { color: C.red, fontWeight: '700', fontSize: 11 },
-  card: { backgroundColor: C.panel, borderRadius: 14, borderWidth: 1, borderColor: C.line, padding: 15, marginTop: 12 }, cardTop: { gap: 5 }, cardTitle: { color: C.red, fontSize: 13, fontWeight: '800' }, date: { color: C.muted, fontSize: 10 }, reason: { color: C.ink, fontSize: 12, lineHeight: 17, marginTop: 10 }, meta: { color: C.muted, fontSize: 10, lineHeight: 16, marginTop: 6 }, divider: { height: 1, backgroundColor: C.line, marginTop: 12 },
+  summaryCard: { backgroundColor: '#F5F7FA', borderColor: '#CBD3DD', borderWidth: 1, borderRadius: 8, padding: 15, marginTop: 16 }, summaryLabel: { color: C.muted, fontSize: 10, lineHeight: 15, fontWeight: '700' }, summaryCount: { color: '#142B49', fontSize: 20, lineHeight: 28, fontWeight: '700', marginTop: 4 }, sectionHeading: { color: C.muted, fontSize: 11, lineHeight: 16, fontWeight: '700', marginTop: 19 },
+  journeyCard: { backgroundColor: '#FFFFFF', borderRadius: 8, borderWidth: 1, borderColor: '#CBD3DD', padding: 15, marginTop: 11 }, journeyTop: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }, journeyTitle: { color: '#142B49', fontSize: 14, lineHeight: 20, fontWeight: '700', marginTop: 8 }, completedBadge: { backgroundColor: '#EDF7F1', borderColor: '#B7D8C5', borderWidth: 1, borderRadius: 5, paddingVertical: 4, paddingHorizontal: 7, minWidth: 87, alignItems: 'center' }, completedText: { color: '#16734B', fontSize: 9, lineHeight: 13, fontWeight: '700' }, eventCard: { backgroundColor: '#F5F7FA', borderRadius: 8, borderWidth: 1, borderColor: C.line, padding: 12, marginTop: 12 }, card: { backgroundColor: C.panel, borderRadius: 14, borderWidth: 1, borderColor: C.line, padding: 15, marginTop: 12 }, cardTop: { gap: 5 }, cardTitle: { color: C.red, fontSize: 13, fontWeight: '800' }, date: { color: C.muted, fontSize: 10, lineHeight: 16 }, reason: { color: C.ink, fontSize: 12, lineHeight: 17, marginTop: 10 }, meta: { color: C.muted, fontSize: 10, lineHeight: 16, marginTop: 6 }, divider: { height: 1, backgroundColor: C.line, marginTop: 12 },
 });

@@ -2,6 +2,7 @@ import {
   SafetyDecisionEngine,
   type SafetyEngineAction,
   type SafetyEnginePolicy,
+  type SafetyDecisionRecord,
   type SafetySignal,
 } from './safetyDecisionEngine';
 
@@ -15,11 +16,21 @@ export class SafetyAgent {
   private readonly engine: SafetyDecisionEngine;
   private confirmationTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly onAction: (action: AgentAction, reason?: string, deadline?: number) => void;
+  private readonly onDecisionHistory?: (records: SafetyDecisionRecord[]) => void;
 
-  constructor(onAction: (action: AgentAction, reason?: string, deadline?: number) => void, policy: SafetyAgentPolicy = {}) {
+  constructor(
+    onAction: (action: AgentAction, reason?: string, deadline?: number) => void,
+    policy: SafetyAgentPolicy = {},
+    onDecisionHistory?: (records: SafetyDecisionRecord[]) => void,
+  ) {
     this.engine = new SafetyDecisionEngine(policy);
     this.onAction = onAction;
+    this.onDecisionHistory = onDecisionHistory;
   }
+
+  get state() { return this.engine.state; }
+
+  getDecisionHistory() { return this.engine.getDecisionHistory(); }
 
   startJourney() {
     this.consume(this.engine.startJourney());
@@ -29,10 +40,17 @@ export class SafetyAgent {
     this.consume(this.engine.observe(signal));
   }
 
+  activateManually(reason = 'Manual SOS') {
+    this.consume(this.engine.activateManually(reason));
+  }
+
   cancelPendingAlert() {
     this.clearConfirmationTimer();
     const actions = this.engine.confirmSafe();
-    if (actions.length > 0) this.onAction('none');
+    if (actions.length > 0) {
+      this.onAction('none');
+      this.persistDecisionHistory();
+    }
   }
 
   markAlertsSent() {
@@ -66,6 +84,11 @@ export class SafetyAgent {
         this.onAction('send_emergency', action.reason);
       }
     }
+    if (actions.length > 0) this.persistDecisionHistory();
+  }
+
+  private persistDecisionHistory() {
+    this.onDecisionHistory?.(this.engine.getDecisionHistory());
   }
 
   private clearConfirmationTimer() {

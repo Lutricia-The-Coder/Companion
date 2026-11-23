@@ -51,6 +51,14 @@
     },
     "plugins": [
       [
+        "expo-build-properties",
+        {
+          "android": {
+            "enableMinifyInReleaseBuilds": false
+          }
+        }
+      ],
+      [
         "expo-router",
         {
           "root": "src/app",
@@ -84,6 +92,13 @@
         }
       ],
       [
+        "expo-notifications",
+        {
+          "defaultChannel": "safety-alerts",
+          "enableRemoteNotifications": true
+        }
+      ],
+      [
         "expo-sensors",
         {
           "motionPermission": "Companion checks movement for possible falls during an active safety journey."
@@ -93,7 +108,8 @@
       "expo-speech-recognition",
       "expo-status-bar",
       "expo-asset",
-      "expo-sqlite"
+      "expo-sqlite",
+      "expo-web-browser"
     ],
     "web": {
       "favicon": "./assets/favicon.png",

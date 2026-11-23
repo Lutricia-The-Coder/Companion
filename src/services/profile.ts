@@ -7,9 +7,26 @@ import { ACTIVE_JOURNEY_KEY } from './journeys';
 import { saveTriggerPhrases } from './triggerPhrases';
 import { clearLocalEmergencyEvidence } from './evidence';
 import { clearPendingLocationUpload } from './locationPublishing';
+import { removePrivateItems } from './privateStorage';
 
 export type TrustedContact = { name: string; phone?: string; email?: string };
-export type NotificationPreferences = { email: boolean; route_deviation: boolean };
+export type NotificationPreferences = { email: boolean; route_deviation: boolean; push: boolean };
+export type EvidenceRetentionDays = 7 | 30 | 90;
+
+export async function loadEvidenceRetentionDays(uid: string): Promise<EvidenceRetentionDays> {
+  const { data, error } = await requireSupabase().from('profiles').select('evidence_retention_days').eq('id', uid).single();
+  if (error) throw error;
+  const days = Number(data.evidence_retention_days);
+  return days === 7 || days === 90 ? days : 30;
+}
+
+export async function saveEvidenceRetentionDays(uid: string, days: EvidenceRetentionDays) {
+  const { error } = await requireSupabase().from('profiles').update({
+    evidence_retention_days: days,
+    updated_at: new Date().toISOString(),
+  }).eq('id', uid);
+  if (error) throw error;
+}
 
 export async function saveTrustedContacts(uid: string, contacts: TrustedContact[]) {
   const client = requireSupabase();
@@ -53,11 +70,13 @@ export async function deleteAccount() {
       'companion-background-audio-enabled', 'companion-motion-enabled', 'companion-phrase-monitor-enabled',
       'companion-share-journey-default', 'companion-notification-preferences-pending',
       'companion-route-deviation-threshold-m',
+      'companion-evidence-retention-days',
       'companion-background-location-emergency-cadence',
       'companion-emergency-audio-evidence-v1',
     ]),
     saveTriggerPhrases([]),
     clearLocalEmergencyEvidence(),
     clearPendingLocationUpload(),
+    removePrivateItems(['companion-contacts', 'companion-destination', 'companion-route-waypoints', 'companion-last-location', 'companion-active-route', 'companion-route-origin', 'companion-pending-location-upload']),
   ]);
 }

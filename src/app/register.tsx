@@ -1,6 +1,7 @@
-import { useState } from 'react';
-import { Alert, KeyboardAvoidingView, PermissionsAndroid, Platform, SafeAreaView, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useEffect, useState } from 'react';
+import { Alert, KeyboardAvoidingView, PermissionsAndroid, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as Linking from 'expo-linking';
 import * as Location from 'expo-location';
 import { Camera } from 'expo-camera';
@@ -9,11 +10,16 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase, supabaseReady } from '../lib/supabase';
 import { saveNotificationPreferences, saveTrustedContacts } from '../services/profile';
 import { createTriggerPhrase, saveTriggerPhrases, type TriggerPhrase } from '../services/triggerPhrases';
+import { startGoogleOAuth } from '../services/oauth';
+import { setPrivateItem } from '../services/privateStorage';
+import { theme } from '../theme';
 
-const C = { bg: '#F7F7F6', panel: '#F0F0EF', ink: '#151515', muted: '#707070', teal: '#D52B37', line: '#E3E3E2', red: '#D52B37' };
+const C = { bg: theme.background, panel: theme.surface, ink: theme.ink, muted: theme.muted, teal: theme.navy, line: theme.line, red: theme.red };
 
 export default function RegisterScreen() {
   const router = useRouter();
+  const { oauth } = useLocalSearchParams<{ oauth?: string }>();
+  const oauthRegistration = oauth === '1';
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -31,6 +37,17 @@ export default function RegisterScreen() {
   const [permissionSetupStatus, setPermissionSetupStatus] = useState('Permissions are requested only when you enable them or use a feature. You can review them in app settings.');
   const [busy, setBusy] = useState(false);
 
+  useEffect(() => {
+    if (!oauthRegistration || !supabase) return;
+    let mounted = true;
+    void supabase.auth.getUser().then(({ data: { user } }) => {
+      if (!mounted || !user) return;
+      setName(String(user.user_metadata?.display_name ?? user.user_metadata?.full_name ?? user.user_metadata?.name ?? ''));
+      setEmail(user.email ?? '');
+    });
+    return () => { mounted = false; };
+  }, [oauthRegistration]);
+
   const updatePhrase = (id: string, patch: Partial<TriggerPhrase>) => {
     setPhrases((current) => current.map((item) => item.id === id ? { ...item, ...patch } : item));
   };
@@ -45,14 +62,14 @@ export default function RegisterScreen() {
 
   const register = async () => {
     const enabledPhrases = phrases.filter((item) => item.enabled && item.phrase.trim().length >= 2);
-    if (!name.trim() || !email.trim() || password.length < 8 || enabledPhrases.length === 0 || !contactName.trim() || (!contactPhone.trim() && !contactEmail.trim()) || (emailAlerts && !contactEmail.trim())) {
-      Alert.alert('Complete your safety setup', 'Enter your name, email, an 8-character password, at least one enabled SOS phrase, and a trusted contact. Email is required for automatic alerts because SMS is not enabled.');
+    if (!name.trim() || !email.trim() || (!oauthRegistration && password.length < 8) || enabledPhrases.length === 0 || !contactName.trim() || (!contactPhone.trim() && !contactEmail.trim()) || (emailAlerts && !contactEmail.trim())) {
+      Alert.alert('Complete your safety setup', `Enter your name, ${oauthRegistration ? 'at least one enabled SOS phrase' : 'email and an 8-character password'}, and a trusted contact. Email is required for automatic alerts because SMS is not enabled.`);
       return;
     }
     const trustedContact = { name: contactName.trim(), phone: contactPhone.trim(), email: contactEmail.trim().toLowerCase() };
     try {
       await saveTriggerPhrases(phrases.map((item) => ({ ...item, phrase: item.phrase.trim() })).filter((item) => item.phrase.length >= 2));
-      await AsyncStorage.setItem('companion-contacts', JSON.stringify([trustedContact]));
+      await setPrivateItem('companion-contacts', JSON.stringify([trustedContact]));
       await AsyncStorage.multiSet([
         ['companion-phrase-monitor-enabled', String(phraseMonitoring)],
         ['companion-background-audio-enabled', String(backgroundSoundMonitoring)],
@@ -71,6 +88,19 @@ export default function RegisterScreen() {
     }
     setBusy(true);
     try {
+      if (oauthRegistration) {
+        const { data: { user }, error: userError } = await supabase.auth.getUser();
+        if (userError || !user) throw userError ?? new Error('Sign in with Google again to finish account setup.');
+        const { error: metadataError } = await supabase.auth.updateUser({ data: { display_name: name.trim() } });
+        if (metadataError) throw metadataError;
+        const { error: profileError } = await supabase.from('profiles').upsert({ id: user.id, email: user.email ?? email.trim().toLowerCase(), display_name: name.trim() }, { onConflict: 'id' });
+        if (profileError) throw profileError;
+        await saveTrustedContacts(user.id, [trustedContact]);
+        await saveNotificationPreferences(user.id, { email: emailAlerts, route_deviation: routeAlerts, push: false });
+        await AsyncStorage.removeItem('companion-notification-preferences-pending');
+        router.replace('/');
+        return;
+      }
       const { data, error } = await supabase.auth.signUp({
         email: email.trim().toLowerCase(),
         password,
@@ -84,7 +114,7 @@ export default function RegisterScreen() {
       if (error) throw error;
       if (data.user && data.session) {
         await saveTrustedContacts(data.user.id, [trustedContact]);
-        await saveNotificationPreferences(data.user.id, { email: emailAlerts, route_deviation: routeAlerts });
+        await saveNotificationPreferences(data.user.id, { email: emailAlerts, route_deviation: routeAlerts, push: false });
         await AsyncStorage.removeItem('companion-notification-preferences-pending');
       }
       if (data.user && !data.session) {
@@ -96,6 +126,22 @@ export default function RegisterScreen() {
     } catch (error) {
       Alert.alert('Could not create account', error instanceof Error ? error.message : 'Please check your connection and try again.');
     } finally {
+      setBusy(false);
+    }
+  };
+
+  const registerWithGoogle = async () => {
+    if (!supabaseReady || !supabase) {
+      Alert.alert('Supabase setup needed', 'Add your Supabase URL and publishable key to .env.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await startGoogleOAuth('register');
+      if (result.type === 'cancel' || result.type === 'dismiss') setBusy(false);
+      else if (result.type === 'success') router.replace('/register?oauth=1' as never);
+    } catch (error) {
+      Alert.alert('Google sign-up unavailable', error instanceof Error ? error.message : 'Check that Google is enabled in Supabase Auth settings.');
       setBusy(false);
     }
   };
@@ -153,16 +199,16 @@ export default function RegisterScreen() {
       <Text style={s.eyebrow}>CREATE YOUR ACCOUNT</Text>
       <Text style={s.title}>Your safety,{ '\n' }set up your way.</Text>
       <Text style={s.sub}>Choose a private phrase and trusted contact. The native app checks the phrase during an active safety journey when microphone permission and a speech-recognition service are available.</Text>
+      {!oauthRegistration && <><TouchableOpacity style={s.googleButton} onPress={registerWithGoogle} disabled={busy} accessibilityRole="button"><Text style={s.googleMark}>G</Text><Text style={s.googleText}>{busy ? 'Connecting to Google…' : 'Continue with Google'}</Text></TouchableOpacity><View style={s.separator}><View style={s.rule} /><Text style={s.or}>OR SIGN UP WITH EMAIL</Text><View style={s.rule} /></View></>}
       <View style={s.card}>
         <Field label="YOUR NAME" value={name} onChangeText={setName} placeholder="Name" />
-        <Field label="EMAIL ADDRESS" value={email} onChangeText={setEmail} placeholder="you@example.com" keyboardType="email-address" autoCapitalize="none" />
-        <Field label="PASSWORD" value={password} onChangeText={setPassword} placeholder="At least 8 characters" secureTextEntry />
+        {oauthRegistration ? <Text style={s.helper}>Google account: {email || 'loading…'}</Text> : <><Field label="EMAIL ADDRESS" value={email} onChangeText={setEmail} placeholder="you@example.com" keyboardType="email-address" autoCapitalize="none" /><Field label="PASSWORD" value={password} onChangeText={setPassword} placeholder="At least 8 characters" secureTextEntry /></>}
       </View>
       <View style={s.card}>
         <Text style={s.cardTitle}>MONITORING AND SHARING</Text>
         <Text style={s.helper}>All monitoring is limited to journeys you start. Android background audio and motion require the foreground monitor service and the relevant permissions.</Text>
         <SetupSwitch title="Personal phrase monitoring" detail="Recognize your saved phrase while Companion is open during a journey." value={phraseMonitoring} onChange={setPhraseMonitoring} />
-        <SetupSwitch title="Background scream and shout checks" detail="Use the on-device sound classifier while the app is backgrounded. Its accuracy has not been validated." value={backgroundSoundMonitoring} onChange={setBackgroundSoundMonitoring} />
+        <SetupSwitch title="Background distress-sound checks" detail="Use the on-device classifier for screams, shouts, cries, whimpers, and wails while the app is backgrounded. Its accuracy has not been validated." value={backgroundSoundMonitoring} onChange={setBackgroundSoundMonitoring} />
         <SetupSwitch title="Fall and motion checks" detail="Use movement sensors during an active safety journey." value={motionMonitoring} onChange={setMotionMonitoring} />
         <SetupSwitch title="Audio and video evidence after SOS" detail="Allow recording attempts after emergency activation. Android may require the app to be open and camera available." value={evidenceConsent} onChange={setEvidenceConsent} />
         <SetupSwitch title="Share each journey with my contact" detail="When enabled, an emailed contact with a Companion account will be granted live dashboard access at journey start." value={shareEachJourney} onChange={setShareEachJourney} />
@@ -196,7 +242,7 @@ export default function RegisterScreen() {
         <Field label="PHONE NUMBER" value={contactPhone} onChangeText={setContactPhone} placeholder="+27 ..." keyboardType="phone-pad" />
         <Field label={emailAlerts ? 'EMAIL FOR AUTOMATIC ALERTS' : 'EMAIL (OPTIONAL)'} value={contactEmail} onChangeText={setContactEmail} placeholder="contact@example.com" keyboardType="email-address" autoCapitalize="none" />
       </View>
-      <TouchableOpacity style={[s.button, busy && { opacity: 0.6 }]} disabled={busy} onPress={register}><Text style={s.buttonText}>{busy ? 'Creating account…' : 'Create account'}</Text><Text style={s.arrow}>→</Text></TouchableOpacity>
+      <TouchableOpacity style={[s.button, busy && { opacity: 0.6 }]} disabled={busy} onPress={register}><Text style={s.buttonText}>{busy ? 'Saving safety setup…' : oauthRegistration ? 'Finish safety setup' : 'Create account'}</Text><Text style={s.arrow}>→</Text></TouchableOpacity>
       <TouchableOpacity style={s.secondaryButton} onPress={() => router.replace('/login')}><Text style={s.secondaryText}>Already have an account? Sign in</Text></TouchableOpacity>
       {!supabaseReady && <Text style={s.setupNote}>Cloud account and emergency sharing activate after Supabase is configured. Your SOS phrase is stored on this device using encrypted storage on Android.</Text>}
       <Text style={s.privacy}>Audio monitoring and location sharing will only run during a safety journey you start.</Text>
@@ -212,4 +258,4 @@ function SetupSwitch({ title, detail, value, onChange }: { title: string; detail
   return <View style={s.switchRow}><View style={{ flex: 1 }}><Text style={s.switchTitle}>{title}</Text><Text style={s.helper}>{detail}</Text></View><Switch value={value} onValueChange={onChange} accessibilityRole="switch" accessibilityLabel={title} /></View>;
 }
 
-const s = StyleSheet.create({ safe: { flex: 1, backgroundColor: C.bg }, page: { padding: 23, paddingBottom: 40 }, back: { color: C.muted, fontSize: 10, letterSpacing: 1.1, paddingVertical: 8 }, eyebrow: { color: C.teal, letterSpacing: 1.7, fontSize: 10, fontWeight: '800', marginTop: 17 }, title: { color: C.ink, fontSize: 33, lineHeight: 38, fontWeight: '800', marginTop: 15 }, sub: { color: C.muted, fontSize: 13, lineHeight: 20, marginTop: 10, marginBottom: 13 }, card: { backgroundColor: C.panel, borderRadius: 15, borderWidth: 1, borderColor: C.line, padding: 15, marginTop: 10 }, cardTitle: { color: C.teal, fontSize: 9, fontWeight: '800', letterSpacing: 1.3 }, field: { marginTop: 7 }, label: { color: C.muted, fontSize: 8, letterSpacing: 1.1, fontWeight: '800', marginTop: 7 }, input: { color: C.ink, fontSize: 13, minHeight: 39, borderBottomWidth: 1, borderBottomColor: C.line, paddingVertical: 8 }, helper: { color: C.muted, lineHeight: 17, fontSize: 10, marginTop: 7 }, switchRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 12 }, switchTitle: { color: C.ink, fontSize: 11, fontWeight: '700' }, phraseSetup: { borderTopWidth: 1, borderTopColor: C.line, marginTop: 11, paddingTop: 9 }, phraseSetupHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, removePhrase: { color: C.red, fontSize: 10, fontWeight: '700', padding: 6 }, addPhraseButton: { minHeight: 42, marginTop: 12, alignItems: 'center', justifyContent: 'center', borderRadius: 10, borderWidth: 1, borderColor: C.teal }, addPhraseButtonText: { color: C.teal, fontSize: 11, fontWeight: '800' }, permissionButton: { minHeight: 42, marginTop: 12, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: C.teal }, permissionButtonText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' }, button: { marginTop: 16, height: 53, borderRadius: 13, backgroundColor: C.teal, paddingHorizontal: 17, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, buttonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14 }, arrow: { color: '#FFFFFF', fontSize: 22 }, secondaryButton: { padding: 15, alignItems: 'center' }, secondaryText: { color: C.teal, fontSize: 12, fontWeight: '700' }, setupNote: { color: C.red, fontSize: 10, lineHeight: 15, textAlign: 'center', marginTop: 12 }, privacy: { color: C.muted, textAlign: 'center', fontSize: 10, lineHeight: 15, marginTop: 15 } });
+const s = StyleSheet.create({ safe: { flex: 1, backgroundColor: C.bg }, page: { padding: 23, paddingBottom: 40 }, back: { color: C.muted, fontSize: 10, letterSpacing: 1.1, paddingVertical: 8 }, eyebrow: { color: C.teal, letterSpacing: 1.7, fontSize: 10, fontWeight: '800', marginTop: 17 }, title: { color: C.ink, fontSize: 33, lineHeight: 38, fontWeight: '800', marginTop: 15 }, sub: { color: C.muted, fontSize: 13, lineHeight: 20, marginTop: 10, marginBottom: 13 }, googleButton: { minHeight: 50, borderRadius: 12, borderWidth: 1, borderColor: C.line, backgroundColor: '#FFFFFF', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 11, marginTop: 10 }, googleMark: { color: '#4285F4', fontWeight: '900', fontSize: 17 }, googleText: { color: C.ink, fontSize: 12, fontWeight: '700' }, separator: { flexDirection: 'row', alignItems: 'center', gap: 12, marginVertical: 16 }, rule: { height: 1, flex: 1, backgroundColor: C.line }, or: { color: C.muted, fontSize: 9, fontWeight: '700' }, card: { backgroundColor: C.panel, borderRadius: 15, borderWidth: 1, borderColor: C.line, padding: 15, marginTop: 10 }, cardTitle: { color: C.teal, fontSize: 9, fontWeight: '800', letterSpacing: 1.3 }, field: { marginTop: 7 }, label: { color: C.muted, fontSize: 8, letterSpacing: 1.1, fontWeight: '800', marginTop: 7 }, input: { color: C.ink, fontSize: 13, minHeight: 39, borderBottomWidth: 1, borderBottomColor: C.line, paddingVertical: 8 }, helper: { color: C.muted, lineHeight: 17, fontSize: 10, marginTop: 7 }, switchRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 12 }, switchTitle: { color: C.ink, fontSize: 11, fontWeight: '700' }, phraseSetup: { borderTopWidth: 1, borderTopColor: C.line, marginTop: 11, paddingTop: 9 }, phraseSetupHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, removePhrase: { color: C.red, fontSize: 10, fontWeight: '700', padding: 6 }, addPhraseButton: { minHeight: 42, marginTop: 12, alignItems: 'center', justifyContent: 'center', borderRadius: 10, borderWidth: 1, borderColor: C.teal }, addPhraseButtonText: { color: C.teal, fontSize: 11, fontWeight: '800' }, permissionButton: { minHeight: 42, marginTop: 12, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: C.teal }, permissionButtonText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' }, button: { marginTop: 16, height: 53, borderRadius: 13, backgroundColor: C.teal, paddingHorizontal: 17, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, buttonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14 }, arrow: { color: '#FFFFFF', fontSize: 22 }, secondaryButton: { padding: 15, alignItems: 'center' }, secondaryText: { color: C.teal, fontSize: 12, fontWeight: '700' }, setupNote: { color: C.red, fontSize: 10, lineHeight: 15, textAlign: 'center', marginTop: 12 }, privacy: { color: C.muted, textAlign: 'center', fontSize: 10, lineHeight: 15, marginTop: 15 } });

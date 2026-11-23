@@ -1,4 +1,4 @@
-import { clients, response } from '../_shared/common.ts';
+import { clients, response, consumeSensitiveRateLimit } from '../_shared/common.ts';
 
 Deno.serve(async (request) => {
   if (request.method === 'OPTIONS') return response({ ok: true });
@@ -6,6 +6,8 @@ Deno.serve(async (request) => {
   const { user, admin } = clients(request);
   const { data: { user: actor }, error } = await user.auth.getUser();
   if (error || !actor) return response({ error: 'Sign in required' }, 401);
+  const rateError = await consumeSensitiveRateLimit(user, 'delete_account');
+  if (rateError) return response({ error: rateError.message.includes('rate limit') ? 'Account deletion is temporarily rate limited.' : 'Account deletion is unavailable.' }, rateError.message.includes('rate limit') ? 429 : 503);
 
   for (let offset = 0; ; offset += 500) {
     const { data: records, error: recordsError } = await admin.from('evidence').select('object_path').eq('owner_id', actor.id).range(offset, offset + 499);

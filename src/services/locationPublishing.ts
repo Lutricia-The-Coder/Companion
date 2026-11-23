@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { publishLocation, type LivePoint } from './journeys';
+import { getPrivateItem, removePrivateItem, setPrivateItem } from './privateStorage';
 
 export const PENDING_LOCATION_UPLOAD_KEY = 'companion-pending-location-upload';
 export const LOCATION_UPLOAD_STATUS_KEY = 'companion-location-upload-status';
@@ -12,19 +13,19 @@ export async function publishLatestLocation(journeyId: string, point: LivePoint)
     await publishLocation(journeyId, point);
   } catch {
     const pending: PendingLocation = { journeyId, point, attemptedAt: Date.now() };
-    await AsyncStorage.setItem(PENDING_LOCATION_UPLOAD_KEY, JSON.stringify(pending)).catch(() => undefined);
+    await setPrivateItem(PENDING_LOCATION_UPLOAD_KEY, JSON.stringify(pending)).catch(() => undefined);
     await AsyncStorage.setItem(LOCATION_UPLOAD_STATUS_KEY, JSON.stringify({ state: 'pending', journeyId, timestamp: point.timestamp })).catch(() => undefined);
     return false;
   }
 
   try {
-    const pendingRaw = await AsyncStorage.getItem(PENDING_LOCATION_UPLOAD_KEY);
+    const pendingRaw = await getPrivateItem(PENDING_LOCATION_UPLOAD_KEY);
     if (pendingRaw) {
       try {
         const pending = JSON.parse(pendingRaw) as PendingLocation;
-        if (pending.journeyId === journeyId) await AsyncStorage.removeItem(PENDING_LOCATION_UPLOAD_KEY);
+        if (pending.journeyId === journeyId) await removePrivateItem(PENDING_LOCATION_UPLOAD_KEY);
       } catch {
-        await AsyncStorage.removeItem(PENDING_LOCATION_UPLOAD_KEY);
+        await removePrivateItem(PENDING_LOCATION_UPLOAD_KEY);
       }
     }
     await AsyncStorage.setItem(LOCATION_UPLOAD_STATUS_KEY, JSON.stringify({ state: 'synced', journeyId, timestamp: point.timestamp }));
@@ -33,13 +34,13 @@ export async function publishLatestLocation(journeyId: string, point: LivePoint)
 }
 
 export async function clearPendingLocationUpload(journeyId?: string) {
-  const pendingRaw = await AsyncStorage.getItem(PENDING_LOCATION_UPLOAD_KEY);
+  const pendingRaw = await getPrivateItem(PENDING_LOCATION_UPLOAD_KEY);
   if (pendingRaw) {
     try {
       const pending = JSON.parse(pendingRaw) as PendingLocation;
-      if (!journeyId || pending.journeyId === journeyId) await AsyncStorage.removeItem(PENDING_LOCATION_UPLOAD_KEY);
+      if (!journeyId || pending.journeyId === journeyId) await removePrivateItem(PENDING_LOCATION_UPLOAD_KEY);
     } catch {
-      await AsyncStorage.removeItem(PENDING_LOCATION_UPLOAD_KEY);
+      await removePrivateItem(PENDING_LOCATION_UPLOAD_KEY);
     }
   }
   const statusRaw = await AsyncStorage.getItem(LOCATION_UPLOAD_STATUS_KEY);

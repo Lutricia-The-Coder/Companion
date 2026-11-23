@@ -30,7 +30,7 @@ class SafetyDetectorsTest {
 
   @Test fun soundScorerRequiresTwoHighWindowsAndResetsOnQuiet() {
     val scorer = DistressSoundScorer()
-    val highScream = FloatArray(12).apply { this[11] = 0.9f }
+    val highScream = FloatArray(23).apply { this[11] = 0.9f }
     assertNull(scorer.score(highScream))
     val activation = scorer.score(highScream)
     assertEquals("scream", activation?.kind)
@@ -41,9 +41,41 @@ class SafetyDetectorsTest {
 
   @Test fun soundScorerRequestsCheckInForMediumConfidence() {
     val scorer = DistressSoundScorer()
-    val mediumShout = FloatArray(12).apply { this[6] = 0.7f }
+    val mediumShout = FloatArray(23).apply { this[6] = 0.7f }
     val decision = scorer.score(mediumShout)
     assertEquals("shouting", decision?.kind)
     assertFalse(decision?.activate ?: true)
+  }
+
+  @Test fun cryingAndWhimperingAreClassifiedAsVocalDistressButNeverActivateAlone() {
+    val scorer = DistressSoundScorer()
+    val crying = FloatArray(23).apply { this[19] = 0.9f }
+    assertNull(scorer.score(crying))
+    val decision = scorer.score(crying)
+    assertEquals("distress_vocalization", decision?.kind)
+    assertFalse(decision?.activate ?: true)
+  }
+
+  @Test fun shortModelOutputIsRejectedInsteadOfReadingPastTheScoreArray() {
+    assertNull(DistressSoundScorer.prediction(FloatArray(22)))
+  }
+
+  @Test fun audioWindowsAdvanceByTheYamnetHopAndRetainOverlap() {
+    val windows = AudioWindowBuffer(windowSize = 8, hopSize = 3)
+    val first = ShortArray(8) { it.toShort() }
+    windows.append(first, first.size)
+    assertTrue(windows.isReady())
+    assertArrayEquals(first, windows.currentWindow())
+    windows.advance()
+
+    val second = shortArrayOf(8, 9, 10)
+    windows.append(second, second.size)
+    assertTrue(windows.isReady())
+    assertArrayEquals(shortArrayOf(3, 4, 5, 6, 7, 8, 9, 10), windows.currentWindow())
+  }
+
+  @Test fun pcmPreprocessingNormalizesSamplesToYamnetFloatRange() {
+    val result = AudioPreprocessor.normalizePcm16(shortArrayOf(Short.MIN_VALUE, 0, Short.MAX_VALUE))
+    assertArrayEquals(floatArrayOf(-1f, 0f, 32767f / 32768f), result, 0.000001f)
   }
 }

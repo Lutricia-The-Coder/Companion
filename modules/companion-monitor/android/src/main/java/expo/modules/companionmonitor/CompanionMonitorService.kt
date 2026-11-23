@@ -203,8 +203,9 @@ class CompanionMonitorService : Service(), SensorEventListener {
       try {
         val model = loadModel()
         interpreter = Interpreter(model, Interpreter.Options().setNumThreads(2))
-        val sampleRate = 16_000
-        val windowSize = 15_600 // YAMNet input is 0.975 s of mono 16 kHz PCM.
+        val sampleRate = AudioWindowBuffer.SAMPLE_RATE_HZ
+        val windowSize = AudioWindowBuffer.YAMNET_WINDOW_SAMPLES
+        val windowBuffer = AudioWindowBuffer()
         val minBuffer = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         if (minBuffer <= 0) throw IllegalStateException("This device cannot open the microphone input format.")
         val bufferSize = max(minBuffer, windowSize * 2)
@@ -216,15 +217,21 @@ class CompanionMonitorService : Service(), SensorEventListener {
         if (recorder.state != AudioRecord.STATE_INITIALIZED) throw IllegalStateException("Microphone initialization failed.")
         audioRecord = recorder
         recorder.startRecording()
-        val shorts = ShortArray(windowSize)
+        val readBuffer = ShortArray(windowSize)
         while (monitoring && audioMonitoring && !Thread.currentThread().isInterrupted) {
-          var offset = 0
-          while (offset < windowSize && monitoring && audioMonitoring) {
-            val count = recorder.read(shorts, offset, windowSize - offset, AudioRecord.READ_BLOCKING)
+          var readOffset = 0
+          val required = windowBuffer.samplesNeeded()
+          while (readOffset < required && monitoring && audioMonitoring) {
+            val count = recorder.read(readBuffer, 0, minOf(readBuffer.size, required - readOffset), AudioRecord.READ_BLOCKING)
             if (count <= 0) throw IllegalStateException("Microphone stream ended.")
-            offset += count
+            windowBuffer.append(readBuffer, count)
+            readOffset += count
           }
-          if (offset == windowSize && monitoring && audioMonitoring) inferWindow(shorts)
+          if (windowBuffer.isReady() && monitoring && audioMonitoring) {
+            // Timestamp the end of captured audio before inference latency is added.
+            inferWindow(windowBuffer.currentWindow(), System.currentTimeMillis())
+            windowBuffer.advance()
+          }
         }
       } catch (_: SecurityException) {
         publishStatus("Microphone access was denied. Background voice monitoring is off.")
@@ -244,29 +251,35 @@ class CompanionMonitorService : Service(), SensorEventListener {
     }
   }
 
-  private fun inferWindow(samples: ShortArray) {
+  private fun inferWindow(samples: ShortArray, windowTimestamp: Long) {
     val inputTensor = interpreter?.getInputTensor(0) ?: return
     val inputElements = inputTensor.shape().fold(1) { acc, value -> acc * value }
     if (inputElements != samples.size) {
       publishStatus("YAMNet input shape ${inputTensor.shape().contentToString()} does not match the 16 kHz audio window.")
+      soundScorer.reset()
+      scheduleAudioRetry()
       audioMonitoring = false
       return
     }
     val outputTensor = interpreter?.getOutputTensor(0) ?: return
     val outputSize = outputTensor.shape().fold(1) { acc, value -> acc * value }
-    if (outputSize < 12) { audioMonitoring = false; publishStatus("The distress model output does not contain AudioSet labels."); return }
-    val input = Array(1) { FloatArray(samples.size) }
-    for (i in samples.indices) input[0][i] = samples[i] / 32768f
+    if (outputSize <= DistressSoundScorer.VOCAL_DISTRESS_INDICES.last()) {
+      audioMonitoring = false
+      publishStatus("The distress model output does not contain the required AudioSet labels.")
+      scheduleAudioRetry()
+      return
+    }
+    val input = arrayOf(AudioPreprocessor.normalizePcm16(samples))
     val output = Array(1) { FloatArray(outputSize) }
     try {
       val inferenceStartedAt = android.os.SystemClock.elapsedRealtimeNanos()
       interpreter?.run(input as Any, output as Any)
       val scores = output[0]
       val inferenceLatencyMs = (android.os.SystemClock.elapsedRealtimeNanos() - inferenceStartedAt) / 1_000_000.0
-      recordAudioEvaluationWindow(scores, System.currentTimeMillis(), inferenceLatencyMs)
-      // YAMNet AudioSet class-map indices: Shout 6, Yell 9, Children shouting 10, Screaming 11.
+      recordAudioEvaluationWindow(scores, windowTimestamp, inferenceLatencyMs)
+      // AudioSet classes include shout/yell/screaming and crying/whimper/wail vocalizations.
       val decision = soundScorer.score(scores) ?: return
-      val now = System.currentTimeMillis()
+      val now = windowTimestamp
       if (decision.activate) {
         emitSignal(decision.kind, decision.confidence, now)
         onDistress(decision.kind, decision.confidence, now)
@@ -277,6 +290,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
         }
       }
     } catch (error: Exception) {
+      soundScorer.reset()
       publishStatus("Distress sound inference failed: ${error.message ?: "model error"}")
       scheduleAudioRetry()
       audioMonitoring = false
@@ -331,6 +345,13 @@ class CompanionMonitorService : Service(), SensorEventListener {
 
   private fun onDistress(kind: String, confidence: Float, timestamp: Long) {
     if (emergencySent) return
+    if (kind == "distress_vocalization") {
+      // A cry/whimper/wail alone prompts a check-in; only another distinct signal can escalate.
+      pendingSignalAt = timestamp
+      pendingSignalConfidence = confidence
+      requestCheckIn("Possible distress vocalization detected", confidence, timestamp)
+      return
+    }
     if (pendingSignalAt != 0L && timestamp - pendingSignalAt < 12_000) {
       if (kind == "fall" || pendingSignalConfidence >= 0.78f) {
         activateEmergency("Native monitor detected repeated distress signals.")
@@ -496,9 +517,23 @@ class CompanionMonitorService : Service(), SensorEventListener {
       connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
       val code = connection.responseCode
       if (code !in 200..299) throw IllegalStateException("Emergency service rejected the alert (HTTP $code).")
-      publishStatus("Emergency alert accepted by the server; delivery to contacts is still being confirmed.")
+      val payload = connection.inputStream.bufferedReader().use { it.readText() }
+      val result = JSONObject(payload)
+      val notification = result.optJSONObject("notifications")
+      val status = notification?.optString("status").orEmpty().ifBlank { result.optString("status", "unknown") }
+      val retryable = notification?.optBoolean("retryable", result.optBoolean("retryable", false))
+        ?: result.optBoolean("retryable", false)
+      when (status) {
+        "accepted" -> publishStatus(if (retryable) "Email provider accepted the alert; audit confirmation is pending and will be retried safely." else "Email provider accepted the emergency alert. Inbox delivery is not confirmed.")
+        "partial" -> publishStatus("Some emergency emails were accepted; remaining recipients ${if (retryable) "will be retried" else "could not be confirmed"}.")
+        "no_recipients" -> publishStatus("Emergency is recorded, but no eligible email contacts are configured.")
+        "failed" -> publishStatus("Emergency is recorded, but email delivery failed${if (retryable) "; retrying" else " after the retry limit"}.")
+        "unknown" -> publishStatus("Emergency is recorded, but the email provider outcome is unknown${if (retryable) "; retrying safely" else " and retries are exhausted"}.")
+        "already_active" -> publishStatus("Emergency is active, but this server version did not return contact delivery outcomes; retrying the request.")
+        else -> publishStatus("Emergency is recorded, but contact delivery has no confirmed provider outcome.")
+      }
       connection.disconnect()
-      return true
+      return (status == "accepted" && !retryable) || status == "no_recipients" || ((status == "failed" || status == "unknown" || status == "partial") && !retryable)
     } catch (error: Exception) {
       publishStatus("Emergency detected, but the server could not confirm contact alerts: ${error.message ?: "network unavailable"}")
       return false

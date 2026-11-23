@@ -9,6 +9,7 @@ This is the implementation ledger for the requirements supplied in this project 
 - [~] Added an opt-in Android YAMNet prediction metadata log and CSV share/delete controls; no microphone samples are stored. Evaluation labels, consented corpus metrics, and Honor X5c latency/memory/battery measurements remain outstanding.
 
 - [~] Registration now supports up to eight trigger phrases with edit/remove, enable, and independent-activation controls. Encrypted storage is retained. Account/phone end-to-end flow still awaits the final device pass.
+- [~] Email/password and Google OAuth flows are implemented on mobile sign-in/sign-up and dashboard sign-in; Google OAuth credentials, redirect allow-list, and provider flow remain to be configured/verified in Supabase and Google Cloud.
 - [~] Phrase recognition now chooses an installed offline English locale, waits for final transcripts, handles Android's omitted confidence as unknown rather than false zero, and applies low-score policy only to real scores. Honor X5c phrase recall still awaits the fresh APK and real speech.
 - [~] Onboarding choices now control phrase, background audio, motion/fall, evidence consent, email preferences, and opt-in journey sharing. Authentication confirmation and live settings sync require end-to-end validation.
 - [~] Added native motion-monitor enable/disable and service status reporting. Kotlin compilation and handset behavior await the final APK build.
@@ -63,30 +64,34 @@ This is the implementation ledger for the requirements supplied in this project 
 
 ## D. Emergency communication
 
-- [~] Create a unique, idempotent emergency event and save its initial location/time.
-- [~] Notify configured contacts through the supported provider path (email); SMS/push are intentionally excluded unless a suitable provider is configured.
-- [~] Include timestamp, latest location, and secure live journey link in notifications.
+- [~] Create one unique emergency event per activation and save its initial journey location/time; source implementation is complete, deployed verification remains.
+- [~] Notify configured contacts through the supported email provider path (SMS/push are intentionally excluded); verify with the configured provider and a disposable contact.
+- [~] Include activation timestamp, latest available backend location, map link, and authenticated live journey dashboard link in emergency emails; deployed output remains unverified.
 - [~] Continue emergency location updates while the location service is allowed to run.
-- [~] Retry transient provider failures with bounded attempts and idempotency.
-- [~] Record per-recipient attempts and provider responses; distinguish accepted from delivered.
-- [x] Keep provider credentials server-side and do not return fake delivery success.
-- [~] Verify authenticated emergency/route calls and notification outcomes using disposable accounts and a test-only recipient.
+- [~] Retry transient provider failures with a stable provider idempotency key and a six-attempt per-recipient cap; do not resend recipients already accepted by the provider. Verify after deploying the schema and functions.
+- [~] Record per-recipient attempts, provider references/responses, and accepted/failed/unknown outcomes. The app does not claim inbox delivery; remote persistence is unverified.
+- [~] Keep delivery behind a provider adapter; Resend is implemented and server-side secret setup is documented. Existing secret values are not inspected by source checks.
+- [~] Keep provider credentials server-side and do not return fake delivery success; remote function configuration still needs validation.
+- [ ] Apply `202611220001_notification_attempt_outcomes.sql`, deploy updated function bundles, build/install the updated APK, then verify emergency/route calls and notification outcomes using disposable accounts and a test-only recipient.
 
 ## E. Evidence capture and access
 
 - [~] Request consent and permissions for emergency audio evidence.
-- [~] Capture and timestamp short audio evidence when permitted.
-- [~] Capture and timestamp short video evidence when the app is foregrounded, the camera is available, and permission is granted.
+- [~] Capture and timestamp short audio evidence when permitted; Android may suspend or deny background microphone recording.
+- [~] Capture and timestamp short video evidence when the app is foregrounded, the device is unlocked, the camera is available, and permission is granted.
 - [~] Associate evidence with the emergency event and upload when connectivity permits.
-- [~] Store evidence privately and enforce owner/authorized-viewer access with expiring signed links.
-- [~] Verify evidence permission, upload, download authorization, deletion, expiry, and scheduled object cleanup.
+- [~] Store evidence privately; enforce owner/authorized-viewer reads and metadata expiry through migration `202611220002_evidence_retention_and_access.sql` and updated signed-link functions.
+- [~] Let users choose 7/30/90-day retention; apply locally immediately and sync account/cloud retention after the migration is deployed.
+- [~] Keep timestamped history, authorized signed downloads, deletion, offline upload retry, and a bounded scheduled cleanup worker.
+- [~] Apply migration, deploy generated `register-evidence`, `get-evidence-download-url`, and `cleanup-expired-evidence` bundles, and verify expiry/deletion/cleanup against a disposable account. Remote production state is unverified.
 
 ## F. Family dashboard and account controls
 
-- [~] Authenticate dashboard users and require an explicit journey ID/share grant.
-- [~] Show authorized live map, journey state, last update time, emergency events, and evidence.
-- [~] Subscribe to Supabase realtime updates and handle reconnect/stale states.
-- [~] Verify the hosted dashboard configuration and two-account access policies.
+- [~] Authenticate dashboard users and require an explicit journey ID; database RLS only returns journeys shared with the signed-in account or owned by it.
+- [~] Show the authorized live map and route, journey/emergency status, location timestamp/accuracy/stale indicator, route deviation and emergency history, notification attempts, and evidence access.
+- [~] Subscribe to Supabase realtime updates and present loading, empty, offline, query-error, and reconnect states.
+- [~] Keep evidence behind an authenticated short-lived download-url function; verify two-account journey and evidence policies in the hosted dashboard.
+- [~] Publish the changed dashboard bundle and validate auth, share revocation, realtime updates, and evidence access with two disposable accounts.
 - [~] Verify account deletion and its cleanup behavior with a disposable account.
 
 ## G. Android monitoring and platform behavior
@@ -119,7 +124,26 @@ This is the implementation ledger for the requirements supplied in this project 
 - [~] Keep iOS permission and speech-recognition paths where supported; test only in an iOS native build, not by claiming Expo Go/browser equivalence.
 - [~] Clearly disclose that the web preview cannot provide background audio, motion, or native location services.
 
-## K. Release and final verification
+## K. Security and privacy
+
+- [~] Use Supabase Auth with encrypted native session persistence; migrate older local sessions into SecureStore and keep browser sessions on browser storage.
+- [~] Keep trigger phrases, trusted contacts, route cache, last/pending location, and other sensitive native configuration in encrypted device storage; browser preview remains browser-local storage.
+- [~] Enforce row-level owner/shared-contact reads and remove direct client write privileges for journey state, access grants, safety events, evidence metadata, and delivery attempts.
+- [~] Restrict journey share grants/revocation, event creation/resolution, location publication, evidence operations, and account deletion to authenticated server-side checks.
+- [~] Rate-limit sensitive RPCs and Edge Function operations; cap trusted contacts, payload sizes, route sizes, evidence size/type, and provider retries/recipient counts.
+- [~] Keep evidence in private Storage with expiry-aware authorized reads and short-lived signed downloads.
+- [~] Keep provider/service credentials server-side, make generated runtime config ignored, and document `.env.example` plus server-only `supabase/functions/.env.example` templates.
+- [~] Avoid logging raw provider/database errors that may contain user data; preserve bounded delivery outcomes without provider response bodies.
+- [~] User reports applying `202611220003_security_hardening.sql` and deploying the updated function bundles; no secrets are tracked. Verify effective ACL/RLS/rate-limit/share-revocation behavior with disposable accounts before marking complete.
+
+## M. Notification channel completion gap
+
+- [x] Email provider adapter, bounded retry and idempotency policy, outcome logging, and email preferences are implemented in local source.
+- [ ] SMS delivery is not implemented. Trusted contact phone numbers are stored but do not receive alerts.
+- [ ] Remote push delivery and recipient device-token registration are not implemented. Android foreground service notifications are local OS notifications, not push alerts to trusted contacts.
+- [ ] Select/configure providers and implement SMS/push delivery and preferences before claiming the completion requirement “configurable SMS, email, and push notifications” is met. Provider credentials must stay in Supabase Edge Function Secrets; real provider delivery needs a disposable recipient and handset validation.
+
+## L. Release and final verification
 
 - [~] Run typecheck and lint after implementation changes.
 - [~] Run unit/integration checks that do not send real communications or mutate production data.

@@ -2,7 +2,42 @@
 
 The current source implementation is still being completed. Do not use an APK from an earlier pass for feature testing: it predates the current native service and safety-flow changes. The final arm64 APK will be built only after source work is complete, then installed on the Honor X5c for the agreed device checks. Do not use real emergency contacts or invoke evidence cleanup against production data during testing.
 
-## 1. Deploy the three updated Supabase functions
+## Evidence retention/access update (apply before testing this feature)
+
+1. In Supabase Dashboard → **SQL Editor**, open and review `supabase/migrations/202611220002_evidence_retention_and_access.sql`, then run it once. It adds account retention choices and recording timestamps, and changes authenticated Storage reads to require a non-expired evidence row plus journey authorization. Do not run the cleanup worker manually against production data.
+2. Regenerate the Dashboard bundles from the project directory with `node scripts/prepare-supabase-dashboard-functions.mjs`.
+3. Deploy the generated `register-evidence`, `get-evidence-download-url`, and `cleanup-expired-evidence` files from `tmp/supabase-dashboard-functions/` through Dashboard → **Edge Functions**. Keep JWT verification enabled for the two user-facing functions. The cleanup function has a service-role bearer check; invoke it only from the existing scheduled job.
+4. The app's Settings → emergency evidence section lets the owner choose 7, 30, or 90 days. Until the migration is applied, the selection is saved locally and account synchronization will report pending. Once deployed, test with disposable accounts and evidence: verify capture timestamp, chosen expiry, owner and explicitly shared viewer access, denial after expiry, deletion, and the scheduled cleanup run. Do not use real contacts or real sensitive recordings for the test.
+
+Android limits: video requires the app foregrounded, the device unlocked, camera permission, and an available camera. Background/locked camera recording is not promised. Audio recording is an opt-in, time-limited attempt and depends on Android allowing the microphone foreground service to continue. Any recording failure is reported separately; emergency alert and location behavior continues.
+
+## Family dashboard source update
+
+The responsive dashboard source is in `dashboard/`; it uses Supabase Auth, the signed-in user's RLS-filtered journey query, Supabase Realtime, Leaflet maps, and the authenticated `get-evidence-download-url` function. It contains no seeded journeys. After source changes, run `npm run dashboard:build`, then commit and push the source so the connected Cloudflare Pages project can publish it. Keep `dashboard/config.js` out of Git; configure only the Supabase URL and publishable key in Cloudflare Pages variables. Validate with two disposable accounts: owner grants a journey, contact signs in and opens the shared ID, then revoke access and confirm refresh denies the journey. Verify offline/stale display, route/emergency event history, authorized evidence, and notification attempt rows. RLS and deployed policy behavior still require remote testing.
+
+## Google OAuth setup
+
+The mobile sign-up and sign-in screens now use Supabase OAuth with Google. Before testing, configure the provider once:
+
+1. In Google Cloud Console, create an OAuth client for a **Web application**. Copy its client ID and client secret.
+2. In Supabase Dashboard → **Authentication** → **Sign In / Providers** → **Google**, enable Google, paste the client ID and client secret, and save.
+3. In that Google OAuth client, add the exact **Callback URL** displayed by Supabase's Google provider settings as an authorized redirect URI. It usually has the form `https://<project-ref>.supabase.co/auth/v1/callback`; use the dashboard's displayed value, not a guessed one.
+4. In Supabase Dashboard → **Authentication** → **URL Configuration** → **Redirect URLs**, allow `companion-safety://auth/callback`. For Expo web development, also allow `http://localhost:8081/auth/callback`; add the actual hosted app origin callback if you host the Expo web app.
+5. Never put the Google client secret in `.env` or app code. Keep it in Supabase's provider configuration. The mobile deep link is already registered by the app's `companion-safety` scheme.
+
+Google sign-up routes through the existing onboarding screen so users still add their SOS phrase and trusted contact. OAuth uses the same Supabase account/profile and journey authorization policies as password sign-in. A fresh APK is required to test native browser OAuth because Expo WebBrowser is a native module; build it with the other final APK work.
+
+## Security-hardening migration and functions
+
+1. In Supabase Dashboard → **SQL Editor**, review and apply `supabase/migrations/202611220003_security_hardening.sql`. It removes direct client writes to journeys, access grants, safety events, evidence metadata, and notification attempts; preserves owner/contact reads through RLS; moves writes through owner-checked RPCs; adds an owner-only access-revocation RPC; validates routes/contacts; and adds atomic per-user rate limits.
+2. Regenerate all seven self-contained Edge Function bundles with `node scripts/prepare-supabase-dashboard-functions.mjs`.
+3. Deploy `activate-emergency`, `report-route-deviation`, `register-evidence`, `get-evidence-download-url`, `delete-evidence`, `cleanup-expired-evidence`, and `delete-account` from `tmp/supabase-dashboard-functions/`. Keep JWT verification enabled. The scheduled cleanup request still also requires the service-role bearer check in its function source.
+4. Server-only configuration placeholders are in `supabase/functions/.env.example`. Configure real values only in Supabase Dashboard → **Edge Functions → Secrets**. Keep `.env` for public app URL/publishable key only; never copy the service-role or Resend credentials into app code, mobile `.env`, Cloudflare variables, or `dashboard/config.js`.
+5. Use disposable accounts to verify the migration's RLS/privilege behavior, rate-limit responses, grant/revoke sharing, emergency retries, evidence upload/download/deletion, and account deletion. Do not test sensitive operations with real contacts or run cleanup against production data.
+
+The mobile Supabase session now uses Expo SecureStore on Android/iOS, with a one-time migration from the prior local session store. Trusted contacts, route, and last-location cache also migrate into encrypted native storage; browser preview storage is not device encryption. If SecureStore fails, the app fails closed for session persistence rather than writing bearer credentials to plaintext storage.
+
+## 1. Deploy updated Supabase functions
 
 The generated bundles are already prepared in `tmp/supabase-dashboard-functions/`. To regenerate them after future edits, open PowerShell in the project folder and run `node scripts/prepare-supabase-dashboard-functions.mjs`.
 
@@ -13,14 +48,35 @@ For each function below, open Supabase Dashboard → your `Companion` project �
 | `activate-emergency` | `tmp/supabase-dashboard-functions/activate-emergency.ts` |
 | `report-route-deviation` | `tmp/supabase-dashboard-functions/report-route-deviation.ts` |
 | `register-evidence` | `tmp/supabase-dashboard-functions/register-evidence.ts` |
+| `get-evidence-download-url` | `tmp/supabase-dashboard-functions/get-evidence-download-url.ts` |
+| `delete-evidence` | `tmp/supabase-dashboard-functions/delete-evidence.ts` |
+| `cleanup-expired-evidence` | `tmp/supabase-dashboard-functions/cleanup-expired-evidence.ts` |
+| `delete-account` | `tmp/supabase-dashboard-functions/delete-account.ts` |
 
-For each one, save a private backup of its current code, replace the editor with the entire matching file, leave **Verify JWT** enabled, and click **Deploy updates**. Do not add any API keys to the function source. Existing secrets stay in Edge Function Secrets. Confirm the function shows the latest deployment time before moving to the next one.
+For each one, save a private backup of its current code, replace the editor with the entire matching file, leave **Verify JWT** enabled (the cleanup worker also retains its service-role bearer check), and click **Deploy updates**. Do not add any API keys to the function source. Existing secrets stay in Edge Function Secrets. Confirm the function shows the latest deployment time before moving to the next one. The generator prepares seven bundles with the shared validation, rate-limit, email-provider, and notification code included.
 
 ## 2. Email without buying a domain
 
 The current Resend test sender `onboarding@resend.dev` can only send to the email address that owns the Resend account. You can test the email flow without paying for a domain by adding that same account-owner address as the test journey's trusted contact. The provider dashboard will show whether Resend accepted the message; check the owner's inbox for receipt.
 
 To send to any other trusted contact, Resend requires a verified sending domain. Skip that until you own or control a domain. Supabase Auth confirmation SMTP is separate and does not prove emergency email delivery works.
+
+### Emergency email provider configuration
+
+The Edge Function uses a provider adapter. The current adapter is Resend; configure these as Supabase Edge Function secrets:
+
+```text
+COMPANION_EMAIL_PROVIDER=resend
+RESEND_API_KEY=<Resend API key>
+RESEND_FROM_EMAIL=onboarding@resend.dev
+COMPANION_DASHBOARD_URL=https://companion-family.pages.dev
+```
+
+Never put the Resend key in `.env`, app code, dashboard configuration, or function source. `onboarding@resend.dev` is limited to the Resend account owner's address in test mode. Sending to other contacts requires a sender address on a verified domain. Provider `accepted` means Resend accepted the request; it does not confirm inbox delivery. Bounce/delivered states require a Resend webhook integration and are not claimed by the app.
+
+Emergency activation creates one event and snapshots the initial journey location. Its email includes the activation timestamp, latest backend location when available, a map link, and the authenticated dashboard journey link. Android emergency mode continues the active location task at the configured faster cadence. Per-recipient sends use a stable idempotency key; accepted recipients are not resent. Failed and ambiguous outcomes are tracked separately, with up to six total attempts per recipient across bounded function/device retries. No-recipient, failed, unknown, partial, and provider-accepted states are distinct.
+
+Before deploying updated function bundles, apply `supabase/migrations/202611220001_notification_attempt_outcomes.sql` in Dashboard → **SQL Editor**. Then regenerate and deploy the `activate-emergency`, `report-route-deviation`, and `register-evidence` bundles as in Step 1. Build a fresh APK after the native service source change. These are production changes: do not apply the migration or deploy until approved.
 
 ## 3. Publish the family dashboard on Cloudflare Pages
 
@@ -78,7 +134,7 @@ These account-level tests require your logged-in Dashboard session and test acco
 
 ## 7. Evaluate the audio model (requires the final APK and a consented corpus)
 
-Do not describe YAMNet scream/shout detection as reliable until measured. An opt-in Android prediction logger is now wired to Settings → Audio Model Evaluation. While an active journey has background audio monitoring enabled, it records only the per-window predicted class, confidence, timestamp, threshold, and inference latency. It does not store microphone samples or upload the CSV. The local log is capped at 20,000 rows or 4 MB. Export shares the first 200 data rows at a time through Android's text share sheet; clear the log between batches if you need to export later rows. Keep personal recordings private; do not upload raw evidence to the app's emergency bucket for evaluation. Only use corpus audio with appropriate consent.
+Do not describe YAMNet scream/shout detection as reliable until measured. An opt-in Android prediction logger is wired to Settings → Audio Model Evaluation. While an active journey has background audio monitoring enabled, it records only the per-window predicted class, confidence, timestamp, threshold, and inference latency. It does not store microphone samples or upload the CSV. The local log is capped at 20,000 rows or 4 MB. Export shares the latest 200 data rows through Android's text share sheet; clear the log before each separate evaluation session if earlier session data should not be included. Keep personal recordings private; do not upload raw evidence to the app's emergency bucket for evaluation. Only use corpus audio with appropriate consent.
 
 After collecting predictions on the Honor X5c, fill the exported CSV's blank `actual` column with `distress` or `background` labels and preserve the remaining columns. The logged prediction is a per-window threshold result; it may differ from the multi-window automatic SOS policy. The current service uses a fixed 0.975-second duration per window. Add device memory and battery measurements separately if available. Then run the existing evaluator:
 

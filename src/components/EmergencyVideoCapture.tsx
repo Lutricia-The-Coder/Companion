@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, AppState, StyleSheet, Text, View } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import { File } from 'expo-file-system';
 import { enqueueEmergencyEvidence, loadEvidenceOutbox, uploadPendingEmergencyEvidence } from '../services/evidence';
 
 export default function EmergencyVideoCapture({
@@ -17,13 +18,31 @@ export default function EmergencyVideoCapture({
   const camera = useRef<CameraView>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const [cameraReady, setCameraReady] = useState(false);
+  const [appActive, setAppActive] = useState(AppState.currentState === 'active');
   const [outboxCheckedEvent, setOutboxCheckedEvent] = useState<string | null>(null);
   const startedEvent = useRef<string | null>(null);
+  const appActiveRef = useRef(appActive);
+  const consentRef = useRef(consent);
   const onStatusRef = useRef(onStatus);
+  useEffect(() => { appActiveRef.current = appActive; }, [appActive]);
+  useEffect(() => { consentRef.current = consent; }, [consent]);
   useEffect(() => { onStatusRef.current = onStatus; }, [onStatus]);
 
   useEffect(() => {
-    if (!eventId || !consent) return;
+    const subscription = AppState.addEventListener('change', (state) => {
+      const active = state === 'active';
+      appActiveRef.current = active;
+      setAppActive(active);
+      if (!active && startedEvent.current === eventId && camera.current) {
+        camera.current.stopRecording();
+        onStatusRef.current('Video recording stopped because Companion moved to the background or the device locked. Emergency alerts and location tracking continue; any saved partial clip will be retained if available.');
+      }
+    });
+    return () => subscription.remove();
+  }, [eventId]);
+
+  useEffect(() => {
+    if (!eventId || !consent || !appActive) return;
     let cancelled = false;
     void loadEvidenceOutbox().then((records) => {
       if (cancelled) return;
@@ -38,17 +57,28 @@ export default function EmergencyVideoCapture({
       }
     });
     return () => { cancelled = true; };
-  }, [eventId, consent, permission?.granted, requestPermission]);
+  }, [appActive, eventId, consent, permission?.granted, requestPermission]);
 
   const beginRecording = useCallback(async () => {
     if (!eventId || !journeyId || !consent || !permission?.granted || !cameraReady || !camera.current || outboxCheckedEvent !== eventId || startedEvent.current === eventId) return;
+    if (!appActiveRef.current) {
+      onStatusRef.current('Video evidence is unavailable while Companion is backgrounded or the device is locked. Emergency alerts and location tracking continue.');
+      return;
+    }
     startedEvent.current = eventId;
+    const recordedAt = Date.now();
     onStatusRef.current('Recording up to 20 seconds of muted video evidence');
     try {
       const result = await camera.current.recordAsync({ maxDuration: 20, maxFileSize: 12 * 1024 * 1024 });
       if (!result?.uri) throw new Error('The camera did not save a video file.');
+      if (!consentRef.current) {
+        const discarded = new File(result.uri);
+        if (discarded.exists) discarded.delete();
+        onStatusRef.current('Video recording was discarded because evidence consent was turned off. Emergency alerts and location tracking continue.');
+        return;
+      }
       onStatusRef.current('Video captured; uploading to private evidence storage');
-      await enqueueEmergencyEvidence({ uri: result.uri, journeyId, eventId, type: 'video', durationSeconds: 20 });
+      await enqueueEmergencyEvidence({ uri: result.uri, journeyId, eventId, type: 'video', durationSeconds: 20, recordedAt });
       onStatusRef.current('Video evidence saved privately; secure upload is queued.');
       await uploadPendingEmergencyEvidence({ onStatus: (message) => onStatusRef.current(message) });
     } catch (error) {
@@ -65,7 +95,9 @@ export default function EmergencyVideoCapture({
   if (!eventId || !consent) return null;
   return <View style={styles.card}>
     <Text style={styles.heading}>Emergency video evidence</Text>
-    {!permission?.granted
+    {!appActive
+      ? <Text style={styles.status}>Video capture requires Companion to remain in the foreground with the device unlocked. Emergency alerts and location tracking continue if Android suspends camera access.</Text>
+      : !permission?.granted
       ? <Text style={styles.status}>Camera permission is needed. The emergency alert has already been sent.</Text>
       : <>
         <CameraView
@@ -77,7 +109,7 @@ export default function EmergencyVideoCapture({
           onCameraReady={() => setCameraReady(true)}
           onMountError={(event) => onStatusRef.current(`Camera could not start: ${event.message}`)}
         />
-        <View style={styles.statusRow}><ActivityIndicator color="#5CE0C0" /><Text style={styles.status}>The camera preview and recording are visible. Video has no audio; the separate opt-in audio recording captures sound.</Text></View>
+        <View style={styles.statusRow}><ActivityIndicator color="#5CE0C0" /><Text style={styles.status}>Camera preview and recording indicator are visible. Video is muted; the separate opt-in audio recording captures sound.</Text></View>
       </>}
   </View>;
 }

@@ -1,0 +1,16 @@
+export const theme = {
+  background: '#F5F8FA',
+  surface: '#FFFFFF',
+  surfaceSoft: '#EEF3F6',
+  ink: '#172B3F',
+  muted: '#718091',
+  navy: '#173852',
+  navyDeep: '#102B42',
+  green: '#14805E',
+  greenSoft: '#E8F5EF',
+  red: '#C83B4A',
+  redSoft: '#FFF0F1',
+  amber: '#A96A12',
+  amberSoft: '#FFF6E6',
+  line: '#E0E7EC',
+};

@@ -3,14 +3,17 @@ import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'expo-router';
+import { theme } from './src/theme';
 import { DeviceMotion } from 'expo-sensors';
 import { requestRecordingPermissionsAsync } from 'expo-audio';
-import { ACTIVE_ROUTE_KEY, LAST_LOCATION_KEY, LOCATION_TASK, ROUTE_DEVIATION_COUNT_KEY, ROUTE_DEVIATION_THRESHOLD_KEY, ROUTE_ORIGIN_KEY, SESSION_KEY } from './src/services/backgroundLocation';
+import { ACTIVE_ROUTE_KEY, LAST_LOCATION_KEY, LAST_ROUTE_ALERT_KEY, LOCATION_TASK, ROUTE_DEVIATION_COUNT_KEY, ROUTE_DEVIATION_THRESHOLD_KEY, ROUTE_ORIGIN_KEY, SESSION_KEY } from './src/services/backgroundLocation';
 import { ACTIVE_JOURNEY_KEY, createJourney, finishJourney } from './src/services/journeys';
 import { clearPendingLocationUpload, publishLatestLocation } from './src/services/locationPublishing';
 import { supabase, supabaseConfig, supabaseReady } from './src/lib/supabase';
-import { rememberJourneyId, saveTrustedContacts } from './src/services/profile';
-import { activateEmergency, grantTrustedContactAccess, resolveEmergency as resolveEmergencyEvent } from './src/services/sharing';
+import { loadEvidenceRetentionDays, rememberJourneyId, saveEvidenceRetentionDays, saveTrustedContacts, type EvidenceRetentionDays } from './src/services/profile';
+import { EVIDENCE_RETENTION_KEY } from './src/services/evidence';
+import { getPrivateItem, setPrivateItem, removePrivateItem } from './src/services/privateStorage';
+import { activateEmergency, grantTrustedContactAccess, revokeTrustedContactAccess, resolveEmergency as resolveEmergencyEvent } from './src/services/sharing';
 import LiveLocationMap from './src/components/LiveLocationMap';
 import TriggerPhraseManager from './src/components/TriggerPhraseManager';
 import EmergencyHistory from './src/components/EmergencyHistory';
@@ -18,11 +21,13 @@ import SpeechMonitor from './src/components/SpeechMonitor';
 import EmergencyAudioCapture from './src/components/EmergencyAudioCapture';
 import EmergencyVideoCapture from './src/components/EmergencyVideoCapture';
 import NotificationPreferences from './src/components/NotificationPreferences';
+import DevicePermissions from './src/components/DevicePermissions';
 import { deleteAccount } from './src/services/profile';
-import CompanionMonitor from './modules/companion-monitor';
+import CompanionMonitor, { type MonitorStatus } from './modules/companion-monitor';
 import { loadTriggerPhrases, type TriggerPhrase } from './src/services/triggerPhrases';
 import { isLocationStale, isRouteDeviation, parseRouteCoordinates, shouldAcceptLocationUpdate, type Coordinate, type TimestampedLocation } from './src/services/routeSafety';
 import { planRoadRoute } from './src/services/roadRoutes';
+import { selectLatestAudioEvaluationRows } from './src/services/audioEvaluationCsv';
 import { SafetyAgent, reportSafetySignal, setActiveSafetyAgent } from './src/services/safetyAgent';
 import { FallDetector } from './src/services/fallDetector';
 import {
@@ -32,7 +37,6 @@ import {
   Linking as NativeLinking,
   PermissionsAndroid,
   Platform,
-  SafeAreaView,
   Share,
   ScrollView,
   StatusBar as NativeStatusBar,
@@ -43,10 +47,20 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 type Point = { latitude: number; longitude: number; accuracy: number | null; timestamp: number };
 type Contact = { name: string; phone: string; email?: string };
 const BACKGROUND_LOCATION_EMERGENCY_CADENCE_KEY = 'companion-background-location-emergency-cadence';
+
+function describeAudioEvaluationStatus(status: MonitorStatus) {
+  const latest = status.audioEvaluationLastTimestampMs
+    ? new Date(status.audioEvaluationLastTimestampMs).toLocaleString()
+    : 'none';
+  const microphone = status.audioMonitoring ? 'background microphone active' : 'background microphone paused';
+  const limit = status.audioEvaluationLimitReached ? '; storage cap reached—export and clear predictions to resume' : '';
+  return `Logger ${status.audioEvaluationLogging ? 'ON' : 'OFF'} · ${status.audioEvaluationRowsWritten ?? 0} rows · latest ${latest} · ${microphone}${limit}`;
+}
 
 async function sendEmergencyStatus(reason = 'Manual SOS') {
   const journeyId = await AsyncStorage.getItem(ACTIVE_JOURNEY_KEY);
@@ -63,12 +77,17 @@ async function sendEmergencyStatus(reason = 'Manual SOS') {
         .order('activated_at', { ascending: false }).limit(1).maybeSingle();
       eventId = data?.id ?? null;
     }
-    Alert.alert(
-      result.duplicate ? 'Emergency already active' : 'Emergency activated',
-      result.duplicate
-        ? 'Your existing emergency alert is still active. Trusted contacts are not being sent duplicate alerts.'
-        : 'The server recorded your emergency and is attempting to contact your trusted people. Provider acceptance is shown separately from delivery.',
-    );
+    const deliveryStatus = result.notifications?.status ?? result.status ?? 'unknown';
+    const deliveryMessage = deliveryStatus === 'accepted'
+      ? 'The email provider accepted the alert. Inbox delivery is not confirmed.'
+      : deliveryStatus === 'partial'
+        ? `The provider accepted ${result.notifications?.accepted ?? 0} email(s); ${result.notifications?.failures ?? 0} failed and ${result.notifications?.unknown ?? 0} have unknown outcomes.`
+        : deliveryStatus === 'no_recipients'
+          ? 'The emergency is recorded, but there are no eligible email contacts configured.'
+          : deliveryStatus === 'queued'
+            ? 'The emergency is recorded and contact notification is queued.'
+            : `The emergency is recorded. Email outcome: ${deliveryStatus}${result.notifications?.retryable ? '; a bounded retry is pending.' : '.'}`;
+    Alert.alert(result.duplicate ? 'Emergency already active' : 'Emergency activated', deliveryMessage);
     return { ...result, eventId };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'The emergency could not reach the secure backend.';
@@ -114,18 +133,18 @@ async function restoreBackgroundLocationTask(emergency: boolean) {
 }
 
 const colors = {
-  navy: '#F7F7F6',
-  panel: '#F0F0EF',
-  panel2: '#E8E8E7',
-  ink: '#151515',
-  muted: '#707070',
-  teal: '#D52B37',
-  red: '#D52B37',
-  line: '#E3E3E2',
-  yellow: '#D52B37',
+  navy: theme.background,
+  panel: theme.surface,
+  panel2: theme.surfaceSoft,
+  ink: theme.ink,
+  muted: theme.muted,
+  teal: theme.navy,
+  red: theme.red,
+  line: theme.line,
+  yellow: theme.amber,
 };
 
-export default function App({ screen = 'journey' }: { screen?: 'journey' | 'people' | 'settings' | 'history' }) {
+export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' | 'people' | 'settings' | 'history' }) {
   const router = useRouter();
   const tab = screen;
   const [active, setActive] = useState(false);
@@ -135,6 +154,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
   const [resolvingEmergency, setResolvingEmergency] = useState(false);
   const [journeyId, setJourneyId] = useState<string | null>(null);
   const [evidenceConsent, setEvidenceConsent] = useState(false);
+  const [evidenceRetentionDays, setEvidenceRetentionDays] = useState<EvidenceRetentionDays>(30);
   const [backgroundAudioAllowed, setBackgroundAudioAllowed] = useState(true);
   const [motionMonitoringAllowed, setMotionMonitoringAllowed] = useState(true);
   const [phraseMonitoringAllowed, setPhraseMonitoringAllowed] = useState(true);
@@ -148,17 +168,22 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
   const [nativeMonitorStatus, setNativeMonitorStatus] = useState('');
   const [audioEvaluationLogging, setAudioEvaluationLogging] = useState(false);
   const [audioEvaluationStatus, setAudioEvaluationStatus] = useState('Prediction logging is off');
-  const [notificationPermissionStatus, setNotificationPermissionStatus] = useState('');
   const [speechRetryToken, setSpeechRetryToken] = useState(0);
   const [destination, setDestination] = useState('');
+  const [travelMode, setTravelMode] = useState<'Walking' | 'Driving' | 'Public transport'>('Walking');
   const [routeWaypoints, setRouteWaypoints] = useState<Coordinate[]>([]);
   const [routeWaypointText, setRouteWaypointText] = useState('');
   const [routeStatus, setRouteStatus] = useState('No route check configured');
+  const [journeyOptionsOpen, setJourneyOptionsOpen] = useState(false);
+  const [monitoringDetailsOpen, setMonitoringDetailsOpen] = useState(false);
   const [routeDeviationThreshold, setRouteDeviationThreshold] = useState(100);
   const [contactName, setContactName] = useState('');
   const [contactPhone, setContactPhone] = useState('');
   const [contactEmail, setContactEmail] = useState('');
   const [contacts, setContacts] = useState<Contact[]>([]);
+  const [displayName, setDisplayName] = useState('there');
+  const [userEmail, setUserEmail] = useState('');
+  const [userPhone, setUserPhone] = useState('');
   const [point, setPoint] = useState<Point | null>(null);
   const lastAcceptedLocationRef = useRef<TimestampedLocation | null>(null);
   const [trail, setTrail] = useState<Point[]>([]);
@@ -172,6 +197,17 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
   const routeOriginRef = useRef<Coordinate | null>(null);
   const setPrimaryPhrase = useCallback((phrase: string) => setTrigger(phrase), []);
   useEffect(() => {
+    let cancelled = false;
+    void supabase?.auth.getUser().then(({ data: { user } }) => {
+      if (cancelled || !user) return;
+      const fullName = String(user.user_metadata?.display_name ?? user.user_metadata?.full_name ?? user.user_metadata?.name ?? '').trim();
+      if (fullName) setDisplayName(fullName.split(/\s+/)[0]);
+      if (user.email) setUserEmail(user.email);
+      if (user.phone) setUserPhone(user.phone);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
     const refresh = () => setClock(Date.now());
     const initial = setTimeout(refresh, 0);
     const timer = setInterval(refresh, 10_000);
@@ -179,17 +215,14 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
   }, []);
 
   useEffect(() => {
-    if (!pendingCheckIn) {
-      setCheckInSeconds(0);
-      return;
-    }
+    if (!pendingCheckIn) return;
     const refresh = () => {
       const remaining = Math.max(0, Math.ceil((pendingCheckIn.deadline - Date.now()) / 1000));
       setCheckInSeconds(remaining);
     };
-    refresh();
+    const initial = setTimeout(refresh, 0);
     const timer = setInterval(refresh, 1_000);
-    return () => clearInterval(timer);
+    return () => { clearTimeout(initial); clearInterval(timer); };
   }, [pendingCheckIn]);
 
   useEffect(() => {
@@ -239,11 +272,8 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
       const saved = await AsyncStorage.multiGet([
         SESSION_KEY,
         ACTIVE_JOURNEY_KEY,
-        LAST_LOCATION_KEY,
-        'companion-contacts',
-        'companion-destination',
-        'companion-route-waypoints',
         'companion-evidence-consent',
+        EVIDENCE_RETENTION_KEY,
         'companion-background-audio-enabled',
         'companion-motion-enabled',
         'companion-phrase-monitor-enabled',
@@ -254,8 +284,9 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
       ]);
       const values = Object.fromEntries(saved);
       if (values[ACTIVE_JOURNEY_KEY]) setJourneyId(values[ACTIVE_JOURNEY_KEY]!);
-      if (values['companion-destination']) setDestination(values['companion-destination']!);
       if (values['companion-evidence-consent'] === 'true') setEvidenceConsent(true);
+      const retention = Number(values[EVIDENCE_RETENTION_KEY]);
+      if (retention === 7 || retention === 30 || retention === 90) setEvidenceRetentionDays(retention);
       if (values['companion-background-audio-enabled'] === 'false') setBackgroundAudioAllowed(false);
       if (values['companion-motion-enabled'] === 'false') setMotionMonitoringAllowed(false);
       if (values['companion-phrase-monitor-enabled'] === 'false') setPhraseMonitoringAllowed(false);
@@ -267,18 +298,35 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
         setEmergencyEventId(values['companion-emergency-event-id']!);
         setEmergencyMode(true);
       }
-      if (values['companion-route-waypoints']) {
+      let savedDestination: string | null = null;
+      let savedWaypoints: string | null = null;
+      let savedContacts: string | null = null;
+      let savedLocation: string | null = null;
+      try {
+        [savedDestination, savedWaypoints, savedContacts, savedLocation] = await Promise.all([
+          getPrivateItem('companion-destination'),
+          getPrivateItem('companion-route-waypoints'),
+          getPrivateItem('companion-contacts'),
+          getPrivateItem(LAST_LOCATION_KEY),
+        ]);
+      } catch {
+        setLocationLabel('Secure device storage is unavailable; saved private settings could not be restored.');
+      }
+      if (savedDestination) setDestination(savedDestination);
+      if (savedWaypoints) {
         try {
-          const parsed = parseRouteCoordinates(JSON.parse(values['companion-route-waypoints']!));
+          const parsed = parseRouteCoordinates(JSON.parse(savedWaypoints));
           setRouteWaypoints(parsed);
           setRouteWaypointText(parsed.map(({ latitude, longitude }) => `${latitude}, ${longitude}`).join('; '));
         } catch { setRouteWaypoints([]); }
       }
-      if (values['companion-contacts']) setContacts(JSON.parse(values['companion-contacts']!));
-      if (values[LAST_LOCATION_KEY]) {
-        const savedPoint = JSON.parse(values[LAST_LOCATION_KEY]!) as Point;
-        setPoint(savedPoint);
-        if (typeof savedPoint.accuracy === 'number') lastAcceptedLocationRef.current = { ...savedPoint, accuracy: savedPoint.accuracy };
+      if (savedContacts) setContacts(JSON.parse(savedContacts));
+      if (savedLocation) {
+        const savedPoint = JSON.parse(savedLocation) as Point;
+        if (!lastAcceptedLocationRef.current || savedPoint.timestamp > lastAcceptedLocationRef.current.timestamp) {
+          setPoint(savedPoint);
+          if (typeof savedPoint.accuracy === 'number') lastAcceptedLocationRef.current = { ...savedPoint, accuracy: savedPoint.accuracy };
+        }
       }
       const configuredPhrases = await loadTriggerPhrases();
       setTrigger(configuredPhrases.phrases[0]?.phrase ?? '');
@@ -295,6 +343,37 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
           : 'Journey restored while Companion is open; background location needs permission or could not restart.');
       }
     })();
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    void (async () => {
+      try {
+        const { data: { user } } = await supabase?.auth.getUser() ?? { data: { user: null } };
+        if (!user) return;
+        const remoteDays = await loadEvidenceRetentionDays(user.id);
+        if (!mounted) return;
+        setEvidenceRetentionDays(remoteDays);
+        await AsyncStorage.setItem(EVIDENCE_RETENTION_KEY, String(remoteDays));
+      } catch { /* Local preference remains available until the retention migration is deployed. */ }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  const chooseEvidenceRetention = useCallback(async (days: EvidenceRetentionDays) => {
+    setEvidenceRetentionDays(days);
+    await AsyncStorage.setItem(EVIDENCE_RETENTION_KEY, String(days));
+    try {
+      const { data: { user } } = await supabase?.auth.getUser() ?? { data: { user: null } };
+      if (!user) {
+        setEvidenceStatus(`Evidence retention saved on this device: ${days} days. Sign in to sync it to your account.`);
+        return;
+      }
+      await saveEvidenceRetentionDays(user.id, days);
+      setEvidenceStatus(`Evidence retention saved to this device and your account: ${days} days.`);
+    } catch {
+      setEvidenceStatus(`Evidence retention saved on this device: ${days} days. Account sync is pending until the Supabase migration is applied.`);
+    }
   }, []);
 
   useEffect(() => {
@@ -352,7 +431,9 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
             return [...current, next].slice(-250);
           });
           setLocationLabel('Location is updating on this device');
-          AsyncStorage.setItem(LAST_LOCATION_KEY, JSON.stringify(next));
+          void setPrivateItem(LAST_LOCATION_KEY, JSON.stringify(next)).catch(() => {
+            if (!cancelled) setLocationLabel('Live location continues, but its private device cache could not be saved.');
+          });
           AsyncStorage.getItem(ACTIVE_JOURNEY_KEY).then((journeyId) => {
             if (journeyId) {
               void publishLatestLocation(journeyId, next).then((synced) => {
@@ -392,11 +473,16 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
       return;
     }
     setRouteWaypoints(parsedWaypoints);
-    await AsyncStorage.multiSet([
-      ['companion-contacts', JSON.stringify(contacts)],
-      ['companion-destination', destination.trim()],
-      ['companion-route-waypoints', JSON.stringify(parsedWaypoints)],
-    ]);
+    try {
+      await Promise.all([
+        setPrivateItem('companion-contacts', JSON.stringify(contacts)),
+        setPrivateItem('companion-destination', destination.trim()),
+        setPrivateItem('companion-route-waypoints', JSON.stringify(parsedWaypoints)),
+      ]);
+    } catch {
+      Alert.alert('Secure storage unavailable', 'Your contacts and route settings were not saved on this device. Review device storage settings and try again.');
+      return;
+    }
     const { data: { session } } = supabase ? await supabase.auth.getSession() : { data: { session: null } };
     const user = session?.user ?? null;
     if (user) {
@@ -430,12 +516,13 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
       }
     }
     setRouteWaypoints(plannedRoute);
-    await AsyncStorage.setItem('companion-route-waypoints', JSON.stringify(plannedRoute));
-    await AsyncStorage.multiSet([
-      [ACTIVE_ROUTE_KEY, JSON.stringify(plannedRoute)],
-      [ROUTE_DEVIATION_COUNT_KEY, '0'],
+    await setPrivateItem('companion-route-waypoints', JSON.stringify(plannedRoute));
+    await Promise.all([
+      setPrivateItem(ACTIVE_ROUTE_KEY, JSON.stringify(plannedRoute)),
+      AsyncStorage.setItem(ROUTE_DEVIATION_COUNT_KEY, '0'),
+      removePrivateItem(ROUTE_ORIGIN_KEY),
+      AsyncStorage.removeItem(LAST_ROUTE_ALERT_KEY),
     ]);
-    await AsyncStorage.removeItem(ROUTE_ORIGIN_KEY);
     if (Platform.OS === 'android' && Number(Platform.Version) >= 33) {
       try {
         const permission = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS, {
@@ -444,12 +531,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
           buttonPositive: 'Allow',
           buttonNegative: 'Not now',
         });
-        setNotificationPermissionStatus(permission === PermissionsAndroid.RESULTS.GRANTED
-          ? 'Safety notifications are allowed.'
-          : 'Safety notifications are disabled. The operating system may hide monitor and check-in notifications.');
-      } catch {
-        setNotificationPermissionStatus('Notification permission could not be checked; review Companion permissions in Android Settings.');
-      }
+      } catch { /* Profile → Permissions shows the latest OS permission status. */ }
     }
     if (Platform.OS === 'web') {
       setVoiceStatus('Voice monitoring requires the installed iOS or Android app; this Safari preview only shows the interface');
@@ -518,6 +600,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
       routeOriginRef.current = null;
       activeRouteRef.current = [...plannedRoute];
       routeDeviationCountRef.current = 0;
+      lastRouteSignalAtRef.current = 0;
       setRouteStatus(plannedRoute.length > 0 ? 'Checking route after GPS fix' : 'No route points saved');
       createJourneySafetyAgent();
       setLocationLabel(journeyId
@@ -557,7 +640,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
     setJourneyId(null);
     setActive(false);
     activeRouteRef.current = [];
-    await AsyncStorage.multiRemove([ACTIVE_ROUTE_KEY, ROUTE_ORIGIN_KEY, ROUTE_DEVIATION_COUNT_KEY]);
+    await Promise.all([removePrivateItem(ACTIVE_ROUTE_KEY), removePrivateItem(ROUTE_ORIGIN_KEY), AsyncStorage.removeItem(ROUTE_DEVIATION_COUNT_KEY)]);
     routeOriginRef.current = null;
     setLocationLabel(point ? 'Last location saved on this device' : 'Location not shared');
     return true;
@@ -569,6 +652,7 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
     try {
       await resolveEmergencyEvent(journeyId, emergencyEventId);
       if (Platform.OS === 'android') await CompanionMonitor?.resolveEmergency().catch(() => undefined);
+      safetyAgentRef.current?.resolve();
       await AsyncStorage.removeItem('companion-emergency-event-id');
       setEmergencyEventId(null);
       setEmergencyMode(false);
@@ -593,12 +677,18 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
     }
     const result = await sendEmergencyStatus(reason);
     if (result?.eventId) {
+      if (result.status === 'accepted' || result.status === 'partial') {
+        safetyAgentRef.current?.markAlertsSent();
+      }
+      safetyAgentRef.current?.startEmergencyTracking();
       setEmergencyEventId(result.eventId);
       await AsyncStorage.setItem('companion-emergency-event-id', result.eventId);
     }
   }, [escalateBackgroundLocation, journeyId]);
 
   const createJourneySafetyAgent = useCallback(() => {
+    const decisionStorageKey = `companion-safety-decisions:${journeyId ?? 'unlinked'}`;
+    let decisionWriteQueue: Promise<void> = Promise.resolve();
     const agent = new SafetyAgent((action, reason, deadline) => {
       if (action === 'prompt_user') {
         setPendingCheckIn({ reason: reason || 'A possible distress signal was detected.', deadline: deadline ?? Date.now() + 12_000 });
@@ -606,10 +696,15 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
         setPendingCheckIn(null);
         void requestEmergency(reason || 'Automatic distress detection');
       }
+    }, {}, (records) => {
+      // Store a bounded, transcript-free audit trail so decisions and reasons survive app restarts.
+      decisionWriteQueue = decisionWriteQueue
+        .then(() => AsyncStorage.setItem(decisionStorageKey, JSON.stringify(records)))
+        .catch(() => undefined);
     });
     safetyAgentRef.current = agent;
     setActiveSafetyAgent(agent);
-  }, [requestEmergency]);
+  }, [journeyId, requestEmergency]);
 
   useEffect(() => {
     if (active && !safetyAgentRef.current) createJourneySafetyAgent();
@@ -626,14 +721,21 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
     return () => subscription.remove();
   }, [active, backgroundAudioAllowed, emergencyMode]);
 
+  const refreshAudioEvaluationStatus = useCallback(async () => {
+    if (!CompanionMonitor) return;
+    try {
+      setAudioEvaluationStatus(describeAudioEvaluationStatus(await CompanionMonitor.getStatus()));
+    } catch {
+      setAudioEvaluationStatus('Could not read Android prediction-logger status');
+    }
+  }, []);
+
   useEffect(() => {
     if (Platform.OS !== 'android' || !CompanionMonitor) return;
     void CompanionMonitor.setAudioEvaluationLoggingEnabled(active && audioEvaluationLogging)
-      .then(() => setAudioEvaluationStatus(active && audioEvaluationLogging
-        ? 'Recording prediction metadata for this active journey; microphone audio is not saved.'
-        : 'Prediction logging is off'))
+      .then(refreshAudioEvaluationStatus)
       .catch(() => setAudioEvaluationStatus('Could not update the Android evaluation logging setting'));
-  }, [active, audioEvaluationLogging]);
+  }, [active, audioEvaluationLogging, refreshAudioEvaluationStatus]);
 
   const exportAudioEvaluationCsv = useCallback(async () => {
     if (Platform.OS !== 'android' || !CompanionMonitor) {
@@ -641,19 +743,17 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
       return;
     }
     try {
-      const csv = await CompanionMonitor.getAudioEvaluationCsv();
-      const lines = csv.trim().split(/\r?\n/);
-      if (lines.length < 2) {
+      const { csv: shareCsv, sharedRows, omittedRows } = selectLatestAudioEvaluationRows(await CompanionMonitor.getAudioEvaluationCsv());
+      if (sharedRows === 0) {
         Alert.alert('No predictions yet', 'Enable prediction logging, then run an active journey with background sound monitoring enabled.');
         return;
       }
-      const shareCsv = [lines[0], ...lines.slice(1, 201)].join('\n');
-      const omitted = Math.max(0, lines.length - 201);
       await Share.share({
         title: 'Companion audio evaluation CSV',
         message: shareCsv,
       }, { dialogTitle: 'Export audio evaluation predictions' });
-      setAudioEvaluationStatus(`Shared ${Math.min(lines.length - 1, 200)} prediction rows${omitted ? `; ${omitted} later rows were omitted` : ''}. No raw audio is included. Fill the blank actual column before evaluation.`);
+      const status = describeAudioEvaluationStatus(await CompanionMonitor.getStatus());
+      setAudioEvaluationStatus(`${status} · shared ${sharedRows} recent rows${omittedRows ? `; ${omittedRows} older omitted` : ''}. No raw audio included.`);
     } catch {
       setAudioEvaluationStatus('Could not export the audio evaluation predictions');
       Alert.alert('Export failed', 'Android could not open the share sheet for the prediction CSV.');
@@ -667,11 +767,11 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
       { text: 'Cancel', style: 'cancel' },
       { text: 'Delete', style: 'destructive', onPress: () => {
         void monitor.clearAudioEvaluationCsv()
-          .then(() => setAudioEvaluationStatus('Local prediction log deleted'))
+          .then(refreshAudioEvaluationStatus)
           .catch(() => setAudioEvaluationStatus('Could not delete the local prediction log'));
       } },
     ]);
-  }, []);
+  }, [refreshAudioEvaluationStatus]);
 
   useEffect(() => {
     if (!active || !journeyId || Platform.OS !== 'android' || !CompanionMonitor) return;
@@ -772,7 +872,8 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
   };
 
   const triggerEmergency = () => {
-    void requestEmergency('Manual SOS');
+    if (safetyAgentRef.current) safetyAgentRef.current.activateManually('Manual SOS');
+    else void requestEmergency('Manual SOS');
   };
 
   const downloadOfflineSpeechModel = async () => {
@@ -845,12 +946,12 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
         <View style={styles.header}>
           <View>
             <Text style={styles.brand}>COMPANION <Text style={styles.brandDot}>●</Text></Text>
-            <Text style={styles.headerSub}>Your journey, watched over.</Text>
+            <Text style={styles.headerSub}>{tab === 'home' ? 'Your safety companion' : 'Your journey, watched over.'}</Text>
           </View>
-          <View style={styles.avatar}><Text style={styles.avatarText}>S</Text></View>
+          <TouchableOpacity style={styles.avatar} onPress={() => router.replace('/settings')} accessibilityRole="button" accessibilityLabel="Open Profile and Settings"><Text style={styles.avatarText}>{tab === 'home' && userEmail ? userEmail[0]?.toUpperCase() : '⚙'}</Text></TouchableOpacity>
         </View>
         <View style={styles.safetyNotice}><View style={styles.safetyNoticeDot} /><Text style={styles.safetyNoticeText}>LIVE SAFETY FEATURES DEPEND ON PERMISSIONS AND NETWORK</Text></View>
-        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+        <ScrollView contentOffset={{ x: 0, y: 0 }} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
           {!!pendingCheckIn && !emergencyMode && <View style={styles.checkInCard} accessibilityLiveRegion="assertive">
             <Text style={styles.checkInHeading}>SAFETY CHECK · {checkInSeconds}s</Text>
             <Text style={styles.checkInBody}>{pendingCheckIn.reason} If you do not respond, Companion will activate an emergency alert.</Text>
@@ -863,10 +964,29 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
               </TouchableOpacity>
             </View>
           </View>}
-          {tab === 'journey' && <>
-            <View style={styles.eyebrowRow}><Text style={styles.eyebrow}>YOUR SAFETY TODAY</Text><View style={styles.pilot}><Text style={styles.pilotText}>COMPANION</Text></View></View>
-            <Text style={styles.title}>A safer day{ '\n' }starts here.</Text>
-            <Text style={styles.subtitle}>Start a journey to share your live location and activate your safety session.</Text>
+          {tab === 'home' && <>
+            <Text style={styles.title}>Good {clock && new Date(clock).getHours() < 12 ? 'morning' : clock && new Date(clock).getHours() < 17 ? 'afternoon' : 'evening'}, {displayName}</Text>
+            <Text style={styles.subtitle}>{new Date(clock || Date.now()).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })} · {destination || 'Ready for your next journey'}</Text>
+            <View style={styles.homeStatusCard}>
+              <View style={styles.homeStatusTop}><Text style={styles.homeShield}>♡</Text><Text style={styles.homeStatusLabel}>{emergencyMode ? 'EMERGENCY SUPPORT ACTIVE' : active ? 'JOURNEY IN PROGRESS' : 'SAFETY CIRCLE READY'}</Text></View>
+              <Text style={styles.homeStatusTitle}>{emergencyMode ? 'Your contacts have been alerted' : active ? 'Your journey is being shared' : 'Your safety circle is ready'}</Text>
+              <Text style={styles.homeStatusBody}>{active && point ? `Location updated ${new Date(point.timestamp).toLocaleTimeString()}` : `${contacts.length} trusted contact${contacts.length === 1 ? '' : 's'} connected`}</Text>
+            </View>
+            {active && <LiveLocationMap point={point} trail={trail} active={active} route={routeWaypoints} stale={!!point && isLocationStale(point.timestamp, clock)} />}
+            <View style={styles.homeConfidenceCard}><Text style={styles.homeConfidenceTitle}>{active ? 'Stay connected on the way.' : 'Head out with confidence.'}</Text><Text style={styles.homeConfidenceBody}>{active ? 'Your safety circle can follow your live route.' : 'Share your route and safety circle when you travel.'}</Text><TouchableOpacity style={styles.homeConfidenceButton} onPress={() => router.replace('/journey' as never)} accessibilityRole="button"><Text style={styles.homeConfidenceButtonText}>{active ? 'View live journey' : 'Plan a journey'}</Text><Text style={styles.homeConfidenceArrow}>→</Text></TouchableOpacity></View>
+            <Text style={styles.sectionTitle}>Your safety circle</Text>
+            <Text style={styles.homeSupportingText}>{contacts.length ? `${contacts.length} trusted contact${contacts.length === 1 ? '' : 's'} saved` : 'Add trusted people who can follow a journey you share.'}</Text>
+            <TouchableOpacity style={styles.homeToolCard} onPress={() => router.replace('/people')}><Text style={styles.homeToolIcon}>♡</Text><View style={{ flex: 1 }}><Text style={styles.homeToolTitle}>Family & guardians</Text><Text style={styles.homeToolBody}>Manage trusted contacts and journey access</Text></View><Text style={styles.homeToolArrow}>›</Text></TouchableOpacity>
+            <Text style={styles.sectionTitle}>Your safety tools</Text>
+            <TouchableOpacity style={styles.homeToolCard} onPress={() => router.replace('/settings')}><Text style={styles.homeToolIcon}>◉</Text><View style={{ flex: 1 }}><Text style={styles.homeToolTitle}>AI safety monitoring</Text><Text style={styles.homeToolBody}>{active ? 'Monitoring status and personal SOS phrases' : 'Set up phrases, monitoring, and privacy'}</Text></View><Text style={styles.homeToolArrow}>›</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.homeToolCard} onPress={() => router.replace('/settings')}><Text style={styles.homeToolIcon}>⚙</Text><View style={{ flex: 1 }}><Text style={styles.homeToolTitle}>Profile & settings</Text><Text style={styles.homeToolBody}>Manage your personal safety setup and privacy</Text></View><Text style={styles.homeToolArrow}>›</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.homeSosButton} onPress={triggerEmergency} accessibilityRole="button"><Text style={styles.homeSosIcon}>!</Text><View style={{ flex: 1 }}><Text style={styles.homeSosTitle}>Emergency SOS</Text><Text style={styles.homeSosBody}>Alert your trusted contacts</Text></View><Text style={styles.homeSosArrow}>→</Text></TouchableOpacity>
+          </>}
+
+          {tab === 'journey' && (active ? <>
+            <Text style={styles.eyebrow}>LIVE JOURNEY</Text>
+            <Text style={styles.title}>Your journey is live</Text>
+            <Text style={styles.subtitle}>{destination ? `On the way to ${destination}` : 'Your location is being shared with your safety circle.'}</Text>
 
             {emergencyMode && <View style={styles.emergencyCard}>
               <Text style={styles.emergencyHeading}>EMERGENCY MODE IS ACTIVE</Text>
@@ -876,47 +996,52 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
               </TouchableOpacity>
             </View>}
 
-            <View style={styles.monitorCard}><View style={styles.monitorTop}><View style={[styles.pillDot, active && styles.pillDotOn]} /><Text style={styles.monitorHeading}>{active ? 'Journey monitoring active' : 'Monitoring ready'}</Text></View><Text style={styles.monitorBody}>{active ? 'Live location is updating for your active journey.' : 'Start a journey to enable live location and available safety checks.'}</Text><View style={styles.monitorTags}><Text style={styles.monitorTag}>VOICE CUES</Text><Text style={styles.monitorTag}>{triggerPhrases.length} PHRASES</Text><Text style={styles.monitorTag}>LOCATION</Text></View></View>
-            {!!voiceStatus && <Text style={styles.mapLocationStatus}>{voiceStatus}</Text>}
-
-            <LiveLocationMap point={point} trail={trail} active={active} route={routeWaypoints} />
-            <Text style={[styles.mapLocationStatus, point && isLocationStale(point.timestamp, clock) && { color: colors.red }]}>{point ? `${point.latitude.toFixed(5)}, ${point.longitude.toFixed(5)} · ${isLocationStale(point.timestamp, clock) ? 'STALE · ' : ''}${new Date(point.timestamp).toLocaleTimeString()}${locationLabel.startsWith('GPS ') ? ` · ${locationLabel}` : ''}` : locationLabel}</Text>
-            {!!nativeMonitorStatus && <Text style={styles.mapLocationStatus}>{nativeMonitorStatus}</Text>}
-            {!!notificationPermissionStatus && <Text style={[styles.mapLocationStatus, notificationPermissionStatus.includes('disabled') && { color: colors.red }]}>{notificationPermissionStatus}</Text>}
-            {Platform.OS === 'android' && active && !emergencyMode && /not yet downloaded|download is queued|opened speech model setup/i.test(voiceStatus) && <TouchableOpacity onPress={() => void downloadOfflineSpeechModel()} style={styles.speechSetupButton} accessibilityRole="button" accessibilityLabel="Download offline English speech model">
-              <Text style={styles.speechSetupButtonText}>{/not yet downloaded/i.test(voiceStatus) ? 'Download offline English model' : 'Retry speech setup'}</Text>
-            </TouchableOpacity>}
-            {emergencyEventId && <Text style={styles.mapLocationStatus}>{evidenceStatus}</Text>}
+            <View style={styles.liveMapCard}>
+              <View style={styles.liveMapHeading}><Text style={styles.liveMapLabel}>●  LIVE SHARING</Text><Text style={styles.liveMapUpdated}>{point ? `Updated ${Math.max(0, Math.floor((clock - point.timestamp) / 1000))} sec ago` : 'Waiting for GPS'}</Text></View>
+              <LiveLocationMap point={point} trail={trail} active={active} route={routeWaypoints} stale={!!point && isLocationStale(point.timestamp, clock)} />
+            </View>
+            <Text style={[styles.mapLocationStatus, point && isLocationStale(point.timestamp, clock) && { color: colors.red }]}>{point ? `${point.latitude.toFixed(5)}, ${point.longitude.toFixed(5)} · ${isLocationStale(point.timestamp, clock) ? 'STALE · ' : ''}${new Date(point.timestamp).toLocaleTimeString()}` : locationLabel}</Text>
             {routeWaypoints.length > 0 && <Text style={[styles.mapLocationStatus, routeStatus.startsWith('Off route') && { color: colors.red }]}>{routeStatus}</Text>}
 
-            <View style={styles.statusRow}>
-              <StatusPill label={active ? 'Journey active' : 'Location paused'} active={active} />
-              <StatusPill label={active ? 'GPS updates live' : 'GPS paused'} active={active} />
+            <View style={styles.monitorCard}><View style={styles.monitorTop}><View style={[styles.pillDot, styles.pillDotOn]} /><Text style={styles.monitorHeading}>AI monitoring active</Text></View><Text style={styles.monitorBody}>Location, enabled sound checks, and motion checks are running for this journey.</Text><TouchableOpacity onPress={() => router.replace('/settings')}><Text style={styles.shareLink}>Review monitoring and SOS phrase settings</Text></TouchableOpacity></View>
+            <TouchableOpacity style={styles.arrivedButton} onPress={() => void stopJourney()} disabled={emergencyMode}><Text style={styles.arrivedButtonText}>{emergencyMode ? 'Resolve emergency before ending' : 'I’ve arrived · End journey'}</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.sosButton} onPress={triggerEmergency}><Text style={styles.sosIcon}>!</Text><View style={styles.sosCopy}><Text style={styles.sosTitle}>Emergency SOS</Text><Text style={styles.sosSub}>Alert your trusted contacts</Text></View><Text style={styles.sosArrow}>→</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.detailsLink} onPress={() => setMonitoringDetailsOpen((open) => !open)} accessibilityRole="button" accessibilityState={{ expanded: monitoringDetailsOpen }}><Text style={styles.secondaryText}>{monitoringDetailsOpen ? 'Hide monitoring details' : 'Monitoring details'}</Text></TouchableOpacity>
+            {monitoringDetailsOpen && <View style={styles.inputCard}><Text style={styles.cardLabel}>DEVICE & LOCATION STATUS</Text><Text style={styles.helper}>{voiceStatus || 'Voice monitoring status unavailable.'}</Text>{!!nativeMonitorStatus && <Text style={styles.helper}>{nativeMonitorStatus}</Text>}{emergencyEventId && <Text style={styles.helper}>{evidenceStatus}</Text>}<Text style={styles.helper}>Background monitoring depends on Android permissions and operating-system behavior. It may stop if permissions are revoked, the app is force-stopped, or the device powers off.</Text>{Platform.OS === 'android' && !emergencyMode && /not yet downloaded|download is queued|opened speech model setup/i.test(voiceStatus) && <TouchableOpacity onPress={() => void downloadOfflineSpeechModel()} style={styles.speechSetupButton} accessibilityRole="button"><Text style={styles.speechSetupButtonText}>{/not yet downloaded/i.test(voiceStatus) ? 'Download offline English model' : 'Retry speech setup'}</Text></TouchableOpacity>}</View>}
+          </> : <>
+            <Text style={styles.eyebrow}>PLAN A SAFE TRIP</Text>
+            <Text style={styles.title}>Start a journey</Text>
+            <Text style={styles.subtitle}>Choose where you’re heading.</Text>
+            <View style={styles.journeyFieldCard}>
+              <Text style={styles.fieldLabel}>STARTING POINT</Text>
+              <View style={styles.locationField}><Text style={styles.locationFieldIcon}>⌖</Text><Text style={styles.locationFieldText}>{point && !isLocationStale(point.timestamp, clock) ? 'Current location · GPS ready' : 'Current location · Waiting for GPS'}</Text></View>
+              <Text style={[styles.fieldLabel, { marginTop: 16 }]}>DESTINATION</Text>
+              <View style={styles.locationField}><Text style={styles.locationFieldIcon}>⌖</Text><TextInput value={destination} onChangeText={setDestination} onBlur={() => void setPrivateItem('companion-destination', destination.trim())} placeholder="Where are you going?" placeholderTextColor={colors.muted} style={styles.journeyDestinationInput} accessibilityLabel="Journey destination" /></View>
             </View>
-
-            <View style={styles.inputCard}>
-              <Text style={styles.cardLabel}>WHERE ARE YOU HEADED?</Text>
-              <TextInput value={destination} onChangeText={setDestination} onBlur={() => AsyncStorage.setItem('companion-destination', destination.trim())} placeholder="Add a destination" placeholderTextColor={colors.muted} style={styles.input} />
-              <View style={styles.divider} />
-              <Text style={styles.cardLabel}>YOUR SOS PHRASE</Text>
-              <Text style={styles.triggerDisplay}>{trigger ? `“${trigger}”` : 'Add a private phrase in Settings'}</Text>
-              <View style={styles.divider} />
-              <Text style={styles.cardLabel}>ROUTE CHECKPOINTS (OPTIONAL)</Text>
-              <TextInput value={routeWaypointText} onChangeText={setRouteWaypointText} placeholder="-26.2041, 28.0473; -26.2100, 28.0500" placeholderTextColor={colors.muted} style={styles.input} />
-              <Text style={styles.helper}>Enter latitude, longitude checkpoints separated by semicolons, or enter a destination and start a journey to plan a road route from your current location. Three consecutive fixes beyond the selected threshold and GPS-accuracy allowance prompt a safety check. Destination and approximate origin are sent to public geocoding and directions services.</Text>
-            </View>
-
-            <TouchableOpacity style={[styles.primaryButton, active && styles.stopButton]} onPress={active ? stopJourney : startJourney}>
-              <Text style={styles.primaryButtonText}>{active ? (emergencyMode ? 'Emergency must be resolved first' : 'End safety journey') : 'Start a safety journey'}</Text><Text style={styles.buttonArrow}>{active ? '×' : '→'}</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.sosButton} onPress={triggerEmergency}><Text style={styles.sosIcon}>!</Text><View style={styles.sosCopy}><Text style={styles.sosTitle}>Send an SOS now</Text><Text style={styles.sosSub}>Email alerts go to contacts with a saved email address</Text></View><Text style={styles.sosArrow}>→</Text></TouchableOpacity>
-            <Text style={styles.privacyNote}>Voice phrase recognition and motion checks run during an active journey when device permissions and recognition services allow. Continuous background monitoring still depends on native OS behavior and is not yet validated.</Text>
-          </>}
+            <Text style={styles.sectionTitle}>Travel mode</Text>
+            <View style={styles.travelModeRow}>{(['Walking', 'Driving', 'Public transport'] as const).map((mode) => <TouchableOpacity key={mode} style={[styles.travelModeOption, travelMode === mode && styles.travelModeSelected]} onPress={() => setTravelMode(mode)} accessibilityRole="radio" accessibilityState={{ selected: travelMode === mode }}><Text style={[styles.travelModeText, travelMode === mode && styles.travelModeTextSelected]}>{mode}</Text></TouchableOpacity>)}</View>
+            <View style={styles.shareJourneyCard}><View style={{ flex: 1 }}><Text style={styles.homeToolTitle}>Share with your safety circle</Text><Text style={styles.homeToolBody}>{contacts.length ? `${contacts.length} trusted contact${contacts.length === 1 ? '' : 's'} available` : 'Add contacts before starting a shared journey'}</Text></View><Switch value={shareEachJourney} onValueChange={(value) => { setShareEachJourney(value); void AsyncStorage.setItem('companion-share-journey-default', String(value)); }} accessibilityLabel="Share this journey with my safety circle" /></View>
+            <TouchableOpacity style={styles.disclosureButton} onPress={() => setJourneyOptionsOpen((open) => !open)} accessibilityRole="button" accessibilityState={{ expanded: journeyOptionsOpen }}><Text style={styles.disclosureText}>{journeyOptionsOpen ? 'Hide route options' : 'Add route checkpoints'}</Text><Text style={styles.disclosureIcon}>{journeyOptionsOpen ? '−' : '+'}</Text></TouchableOpacity>
+            {journeyOptionsOpen && <View style={styles.inputCard}><Text style={styles.cardLabel}>OPTIONAL ROUTE CHECKPOINTS</Text><TextInput value={routeWaypointText} onChangeText={setRouteWaypointText} placeholder="Latitude, longitude; …" placeholderTextColor={colors.muted} style={styles.input} /><Text style={styles.helper}>A destination plans a road route automatically when route services are available. Three consecutive off-route GPS fixes prompt a safety check.</Text><TouchableOpacity onPress={() => router.replace('/settings')}><Text style={styles.shareLink}>Manage personal SOS phrases in Profile</Text></TouchableOpacity></View>}
+            <View style={styles.estimateCard}><Text style={styles.estimateIcon}>{travelMode === 'Walking' ? '♧' : travelMode === 'Driving' ? '▣' : '⇄'}</Text><View style={{ flex: 1 }}><Text style={styles.homeToolTitle}>{travelMode}</Text><Text style={styles.homeToolBody}>{destination.trim() ? 'Route will be planned when you start' : 'Add a destination to plan your route'}</Text></View></View>
+            <TouchableOpacity style={styles.homePrimaryButton} onPress={() => void startJourney()} accessibilityRole="button"><Text style={styles.homePrimaryText}>Start protected journey</Text><Text style={styles.homePrimaryArrow}>→</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.secondaryButton} onPress={() => router.replace('/settings')}><Text style={styles.secondaryText}>Monitoring settings · {trigger ? `“${trigger}”` : 'Set up SOS phrase'}</Text></TouchableOpacity>
+          </>)}
 
           {tab === 'people' && <>
-            <Text style={styles.eyebrow}>YOUR SAFETY CIRCLE</Text><Text style={styles.title}>People in{ '\n' }your corner.</Text><Text style={styles.subtitle}>Add the people you trust to receive journey alerts.</Text>
+            <Text style={styles.eyebrow}>YOUR SAFETY CIRCLE</Text><Text style={styles.title}>Your people</Text><Text style={styles.subtitle}>Add trusted contacts and share an active journey with them.</Text>
             <View style={styles.inputCard}><Text style={styles.cardLabel}>TRUSTED CONTACTS</Text>
-              {contacts.length === 0 ? <Text style={styles.emptyText}>No contacts added yet. Add at least one person for your safety circle.</Text> : contacts.map((contact, index) => <View key={`${contact.phone}-${contact.email}-${index}`} style={styles.contactRow}><View style={styles.contactAvatar}><Text style={styles.contactInitial}>{contact.name[0]?.toUpperCase()}</Text></View><View style={{ flex: 1 }}><Text style={styles.contactName}>{contact.name}</Text><Text style={styles.contactPhone}>{[contact.phone, contact.email].filter(Boolean).join(' · ')}</Text>{contact.email && <TouchableOpacity onPress={() => shareJourneyWith(contact.email)}><Text style={styles.shareLink}>Grant active journey access</Text></TouchableOpacity>}</View><TouchableOpacity onPress={() => setContacts((items) => items.filter((_, i) => i !== index))}><Text style={styles.remove}>×</Text></TouchableOpacity></View>)}
+                {contacts.length === 0 ? <Text style={styles.emptyText}>No contacts added yet. Add at least one person for your safety circle.</Text> : contacts.map((contact, index) => <View key={`${contact.phone}-${contact.email}-${index}`} style={styles.contactRow}><View style={styles.contactAvatar}><Text style={styles.contactInitial}>{contact.name[0]?.toUpperCase()}</Text></View><View style={{ flex: 1 }}><Text style={styles.contactName}>{contact.name}</Text><Text style={styles.contactPhone}>{[contact.phone, contact.email].filter(Boolean).join(' · ')}</Text>{contact.email && <><TouchableOpacity onPress={() => shareJourneyWith(contact.email)}><Text style={styles.shareLink}>Grant active journey access</Text></TouchableOpacity><TouchableOpacity onPress={() => Alert.alert('Revoke journey access?', `${contact.name} will no longer be able to view the active journey.`, [
+                  { text: 'Cancel', style: 'cancel' },
+                  { text: 'Revoke access', style: 'destructive', onPress: () => void (async () => {
+                    const activeJourney = await AsyncStorage.getItem(ACTIVE_JOURNEY_KEY);
+                    if (!activeJourney) { Alert.alert('No active journey', 'Start the journey before changing its contact access.'); return; }
+                    try {
+                      const revoked = await revokeTrustedContactAccess(activeJourney, contact.email!);
+                      Alert.alert(revoked ? 'Access revoked' : 'No active access found', revoked ? `${contact.name} can no longer view this journey.` : `${contact.name} did not have access to this journey.`);
+                    } catch (error) { Alert.alert('Could not revoke access', error instanceof Error ? error.message : 'Try again while connected.'); }
+                  })() },
+                ])}><Text style={styles.removeAccess}>Revoke active journey access</Text></TouchableOpacity></>}</View><TouchableOpacity onPress={() => setContacts((items) => items.filter((_, i) => i !== index))}><Text style={styles.remove}>×</Text></TouchableOpacity></View>)}
             </View>
             <View style={styles.inputCard}><Text style={styles.cardLabel}>ADD A PERSON</Text><TextInput value={contactName} onChangeText={setContactName} placeholder="Name" placeholderTextColor={colors.muted} style={styles.input} /><View style={styles.divider} /><TextInput value={contactPhone} onChangeText={setContactPhone} placeholder="Phone number (saved; SMS unavailable)" keyboardType="phone-pad" placeholderTextColor={colors.muted} style={styles.input} /><View style={styles.divider} /><TextInput value={contactEmail} onChangeText={setContactEmail} placeholder="Email (required for automatic alerts)" keyboardType="email-address" autoCapitalize="none" placeholderTextColor={colors.muted} style={styles.input} /></View>
             <TouchableOpacity style={styles.primaryButton} onPress={addContact}><Text style={styles.primaryButtonText}>Add trusted contact</Text><Text style={styles.buttonArrow}>+</Text></TouchableOpacity>
@@ -925,12 +1050,21 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
           </>}
 
           {tab === 'settings' && <>
-            <Text style={styles.eyebrow}>YOUR PERSONAL SETUP</Text><Text style={styles.title}>Make it{ '\n' }yours.</Text><Text style={styles.subtitle}>Manage the SOS phrases the native app listens for during an active safety journey.</Text>
+            <ProfileSectionTabs selected="settings" />
+            <View style={styles.profileAccountCard}><Text style={styles.profileName}>{displayName === 'there' ? 'Companion member' : displayName}</Text><Text style={styles.profileDetail}>{userEmail || 'Email not available'}</Text>{!!userPhone && <Text style={styles.profileDetail}>{userPhone}</Text>}</View>
+            <Text style={styles.eyebrow}>SAFETY PREFERENCES</Text>
+            <Text style={styles.subtitle}>Manage your safety setup, monitoring, notifications, and privacy.</Text>
+            <View style={styles.inputCard}>
+              <Text style={styles.cardLabel}>FAMILY & GUARDIAN VIEW</Text>
+              <Text style={styles.helper}>Manage trusted contacts and control who can access journeys you explicitly share.</Text>
+              <TouchableOpacity style={styles.secondaryButton} onPress={() => router.replace('/people')}><Text style={styles.secondaryText}>Manage family and guardians</Text></TouchableOpacity>
+            </View>
+            <DevicePermissions />
             <TriggerPhraseManager onPrimaryPhraseChange={setPrimaryPhrase} />
             <NotificationPreferences />
             <View style={styles.inputCard}>
               <Text style={styles.cardLabel}>MONITORING</Text>
-              <Text style={styles.helper}>Saved phrases are checked by the device speech-recognition service while a journey is active and the app is open. Android also has a background YAMNet shout/scream classifier and fall heuristic when a signed-in Supabase journey and required permissions are active. Their thresholds are unvalidated. An independent SOS phrase can trigger an emergency alert automatically; lower-confidence sound and motion signals may ask you to check in. This prototype cannot contact emergency services.</Text>
+              <Text style={styles.helper}>Saved phrases are checked by the device speech-recognition service while a journey is active and the app is open. Android also has a background YAMNet classifier for shouting, screaming, crying, whimpering and wailing, plus a fall heuristic, when a signed-in Supabase journey and required permissions are active. Its thresholds are unvalidated. An independent SOS phrase can trigger an emergency alert automatically; lower-confidence sound and motion signals may ask you to check in. This prototype cannot contact emergency services.</Text>
               <View style={styles.statusRow}>
                 <Text style={[styles.helper, { flex: 1, marginTop: 0 }]}>Recognize saved phrases while Companion is open during an active journey.</Text>
                 <Switch value={phraseMonitoringAllowed} onValueChange={(value) => {
@@ -986,18 +1120,18 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
               <TouchableOpacity style={styles.secondaryButton} disabled={Platform.OS !== 'android' || !CompanionMonitor} onPress={clearAudioEvaluationCsv}><Text style={styles.secondaryText}>Delete local prediction log</Text></TouchableOpacity>
             </View>
             <View style={styles.inputCard}>
-              <Text style={styles.cardLabel}>EMERGENCY AUDIO EVIDENCE</Text>
+              <Text style={styles.cardLabel}>EMERGENCY AUDIO + VIDEO EVIDENCE</Text>
               <View style={styles.statusRow}>
-              <Text style={[styles.helper, { flex: 1, marginTop: 0 }]}>After an SOS, capture up to 20 seconds of audio and muted video. With Supabase Storage configured, evidence is shared only with authorized journey viewers and expires after 30 days. Delete it from history at any time.</Text>
-                <Switch value={evidenceConsent} onValueChange={(value) => { setEvidenceConsent(value); setEvidenceStatus(value ? 'Audio evidence enabled for the next emergency' : 'Audio evidence is off'); void AsyncStorage.setItem('companion-evidence-consent', String(value)); }} />
+              <Text style={[styles.helper, { flex: 1, marginTop: 0 }]}>Recording is opt-in. After an SOS, audio capture can run only while Android permits its microphone foreground service. Muted video requires the app open, the device unlocked, camera permission, and an available camera; Android may stop or prevent it in the background. Alerts and location continue if recording is unavailable. Recordings stay in private app files while offline, upload to private Supabase storage when connected, and are accessible only to authorized journey viewers. Delete them from History at any time.</Text>
+                <Switch value={evidenceConsent} onValueChange={(value) => { setEvidenceConsent(value); setEvidenceStatus(value ? 'Audio and video evidence enabled for the next emergency' : 'Evidence capture is off'); void AsyncStorage.setItem('companion-evidence-consent', String(value)); }} accessibilityLabel="Opt in to emergency audio and video evidence" />
               </View>
+              <Text style={styles.helper}>Cloud and local retention: {evidenceRetentionDays} days. Choose how long saved recordings are kept.</Text>
+              <View style={styles.thresholdOptions}>{([7, 30, 90] as const).map((days) => <TouchableOpacity key={days} style={[styles.thresholdOption, evidenceRetentionDays === days && styles.thresholdOptionSelected]} onPress={() => void chooseEvidenceRetention(days)} accessibilityRole="radio" accessibilityState={{ selected: evidenceRetentionDays === days }}><Text style={[styles.thresholdOptionText, evidenceRetentionDays === days && styles.thresholdOptionTextSelected]}>{days} days</Text></TouchableOpacity>)}</View>
               <Text style={styles.helper}>{evidenceStatus}</Text>
             </View>
             <View style={styles.noticeCard}><Text style={styles.noticeIcon}>◉</Text><View style={{ flex: 1 }}><Text style={styles.noticeTitle}>You are in control</Text><Text style={styles.noticeBody}>Monitoring and recording must be clearly shown, opt-in, and limited to an active safety session.</Text></View></View>
             <View style={styles.inputCard}>
-              <Text style={styles.cardLabel}>PRIVACY AND PERMISSIONS</Text>
-              {!!notificationPermissionStatus && <Text style={styles.helper}>{notificationPermissionStatus}</Text>}
-              <TouchableOpacity style={styles.secondaryButton} onPress={() => void NativeLinking.openSettings().catch(() => Alert.alert('Settings unavailable', 'Open Android Settings → Apps → Companion → Permissions to review location, microphone, camera, and notification access.'))}><Text style={styles.secondaryText}>Review app permissions</Text></TouchableOpacity>
+              <Text style={styles.cardLabel}>ACCOUNT</Text>
               <TouchableOpacity style={styles.secondaryButton} onPress={() => Alert.alert('Sign out of Companion?', active ? 'Signing out will end this journey and stop Companion monitoring on this device.' : 'You can sign back in later with the same account.', [
                 { text: 'Cancel', style: 'cancel' },
                 { text: 'Sign out', style: 'destructive', onPress: () => void (async () => {
@@ -1021,37 +1155,44 @@ export default function App({ screen = 'journey' }: { screen?: 'journey' | 'peop
             <TouchableOpacity style={styles.primaryButton} onPress={saveSetup}><Text style={styles.primaryButtonText}>Save my setup</Text><Text style={styles.buttonArrow}>→</Text></TouchableOpacity>
             <TouchableOpacity style={styles.secondaryButton} onPress={() => Alert.alert('Prototype limits', 'YAMNet and fall thresholds are not validated for real-world safety. Live contact sharing and route alerts require a working network and deployed Supabase functions. Resend test mode only allows delivery to its account owner; reaching trusted contacts requires a verified sender domain. This prototype cannot contact emergency services. Keep a manual way to call for help.') }><Text style={styles.secondaryText}>Prototype limits</Text></TouchableOpacity>
           </>}
-          {tab === 'history' && <EmergencyHistory />}
+          {tab === 'history' && <><ProfileSectionTabs selected="history" /><EmergencyHistory /></>}
           <Text style={styles.footer}>COMPANION SAFETY · PROTOTYPE</Text>
         </ScrollView>
         <View style={[styles.tabBar, { paddingBottom: Math.max(12, NativeStatusBar.currentHeight ? 12 : 18) }]}>
-          <TabButton label="Journey" icon="⌖" selected={tab === 'journey'} onPress={() => router.replace('/')} />
-          <TabButton label="My people" icon="♡" selected={tab === 'people'} onPress={() => router.replace('/people')} />
-          <TabButton label="History" icon="◷" selected={tab === 'history'} onPress={() => router.replace('/history' as never)} />
-          <TabButton label="Settings" icon="⚙" selected={tab === 'settings'} onPress={() => router.replace('/settings')} />
+          <TabButton label="Home" icon="⌂" selected={tab === 'home'} onPress={() => router.replace('/')} />
+          <TabButton label="Journey" icon="⌖" selected={tab === 'journey'} onPress={() => router.replace('/journey' as never)} />
+          <TabButton label="Contacts" icon="♡" selected={tab === 'people'} onPress={() => router.replace('/people')} />
+          <TabButton label="Profile" icon="●" selected={tab === 'settings' || tab === 'history'} onPress={() => router.replace('/settings')} />
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
-function StatusPill({ label, active }: { label: string; active: boolean }) {
-  return <View style={styles.pill}><View style={[styles.pillDot, active && styles.pillDotOn]} /><Text style={styles.pillText}>{label}</Text></View>;
-}
-
 function TabButton({ label, icon, selected, onPress }: { label: string; icon: string; selected: boolean; onPress: () => void }) {
   return <TouchableOpacity style={styles.tabButton} onPress={onPress} accessibilityRole="tab" accessibilityState={{ selected }}><Text style={[styles.tabIcon, selected && styles.tabSelected]}>{icon}</Text><Text style={[styles.tabLabel, selected && styles.tabSelected]}>{label}</Text></TouchableOpacity>;
+}
+
+function ProfileSectionTabs({ selected }: { selected: 'settings' | 'history' }) {
+  const router = useRouter();
+  return <View style={styles.profileTabs} accessibilityRole="tablist">
+    <TouchableOpacity style={[styles.profileTab, selected === 'settings' && styles.profileTabSelected]} onPress={() => router.replace('/settings')} accessibilityRole="tab" accessibilityState={{ selected: selected === 'settings' }}><Text style={[styles.profileTabText, selected === 'settings' && styles.profileTabTextSelected]}>Settings</Text></TouchableOpacity>
+    <TouchableOpacity style={[styles.profileTab, selected === 'history' && styles.profileTabSelected]} onPress={() => router.replace('/history' as never)} accessibilityRole="tab" accessibilityState={{ selected: selected === 'history' }}><Text style={[styles.profileTabText, selected === 'history' && styles.profileTabTextSelected]}>History</Text></TouchableOpacity>
+  </View>;
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.navy },
   header: { paddingHorizontal: 22, paddingTop: 8, paddingBottom: 13, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: colors.line },
+  disclosureButton: { minHeight: 45, marginTop: 7, paddingHorizontal: 13, borderRadius: 12, borderWidth: 1, borderColor: colors.line, backgroundColor: '#FFFFFF', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, disclosureText: { color: colors.ink, fontSize: 12, fontWeight: '700' }, disclosureIcon: { color: colors.teal, fontSize: 20, fontWeight: '700' }, detailsLink: { alignSelf: 'center', paddingHorizontal: 14, paddingVertical: 10, marginTop: 5 },
   safetyNotice: { backgroundColor: '#FBEDEF', minHeight: 27, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, paddingHorizontal: 10 }, safetyNoticeDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.red }, safetyNoticeText: { color: '#A82731', fontSize: 8, fontWeight: '800', letterSpacing: 0.7 },
   brand: { color: colors.ink, fontSize: 15, letterSpacing: 2.4, fontWeight: '800' }, brandDot: { color: colors.teal, fontSize: 10 },
   headerSub: { color: colors.muted, fontSize: 11, marginTop: 4 }, avatar: { height: 36, width: 36, borderRadius: 18, backgroundColor: colors.panel2, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.line }, avatarText: { color: colors.teal, fontWeight: '700' },
   content: { padding: 21, paddingBottom: 36 }, eyebrowRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 7 }, eyebrow: { color: colors.red, letterSpacing: 1.5, fontSize: 9, fontWeight: '800', marginTop: 10 }, pilot: { borderColor: colors.line, backgroundColor: colors.panel, borderWidth: 1, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 20 }, pilotText: { color: colors.muted, fontSize: 8, letterSpacing: 1.2, fontWeight: '700' },
   title: { color: colors.ink, fontSize: 34, lineHeight: 37, letterSpacing: -1.1, fontWeight: '800', marginTop: 15 }, subtitle: { color: colors.muted, fontSize: 13, lineHeight: 20, marginTop: 9, marginBottom: 18 },
-  monitorCard: { backgroundColor: '#151515', padding: 16, borderRadius: 15, marginBottom: 14 }, monitorTop: { flexDirection: 'row', alignItems: 'center', gap: 8 }, monitorHeading: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' }, monitorBody: { color: '#D1D1D1', fontSize: 11, lineHeight: 16, marginTop: 8 }, monitorTags: { flexDirection: 'row', gap: 7, marginTop: 13, flexWrap: 'wrap' }, monitorTag: { color: '#FFFFFF', backgroundColor: '#303030', borderRadius: 12, overflow: 'hidden', fontSize: 8, letterSpacing: 0.6, fontWeight: '800', paddingHorizontal: 8, paddingVertical: 5 },
+  monitorCard: { backgroundColor: theme.greenSoft, borderWidth: 1, borderColor: '#CDE8DA', padding: 16, borderRadius: 15, marginBottom: 14 }, monitorTop: { flexDirection: 'row', alignItems: 'center', gap: 8 }, monitorHeading: { color: theme.ink, fontSize: 14, fontWeight: '800' }, monitorBody: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 8 }, monitorTags: { flexDirection: 'row', gap: 7, marginTop: 13, flexWrap: 'wrap' }, monitorTag: { color: theme.green, backgroundColor: '#D7EEE2', borderRadius: 12, overflow: 'hidden', fontSize: 8, letterSpacing: 0.6, fontWeight: '800', paddingHorizontal: 8, paddingVertical: 5 },
+  homeStatusCard: { backgroundColor: theme.greenSoft, borderWidth: 1, borderColor: '#CDE8DA', borderRadius: 14, padding: 13, marginBottom: 11 }, homeStatusTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 }, homeShield: { color: theme.green, fontSize: 15, marginRight: 7 }, homeStatusLabel: { color: theme.green, fontSize: 8, fontWeight: '800', letterSpacing: 0.7 }, homeStatusTitle: { color: colors.ink, fontSize: 12, fontWeight: '800' }, homeStatusBody: { color: colors.muted, fontSize: 9, marginTop: 4 }, homeLastUpdate: { color: theme.green, fontSize: 10, fontWeight: '700', marginTop: 10 }, homeConfidenceCard: { backgroundColor: theme.navyDeep, borderRadius: 14, padding: 15, marginBottom: 13 }, homeConfidenceTitle: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' }, homeConfidenceBody: { color: '#DCE6EE', fontSize: 9, marginTop: 5, marginBottom: 12 }, homeConfidenceButton: { minHeight: 38, backgroundColor: '#FFFFFF', borderRadius: 8, paddingHorizontal: 11, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, homeConfidenceButtonText: { color: theme.navy, fontSize: 10, fontWeight: '800' }, homeConfidenceArrow: { color: theme.navy, fontSize: 17 }, homePrimaryButton: { minHeight: 50, backgroundColor: theme.navy, borderRadius: 13, marginTop: 16, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, homePrimaryText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' }, homePrimaryArrow: { color: '#FFFFFF', fontSize: 21 }, sectionTitle: { color: colors.ink, fontSize: 10, fontWeight: '800', letterSpacing: 0.8, marginTop: 15, marginBottom: 1 }, homeSupportingText: { color: colors.muted, fontSize: 11, lineHeight: 17, marginTop: 5, marginBottom: 8 }, homeToolCard: { minHeight: 57, flexDirection: 'row', alignItems: 'center', backgroundColor: theme.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 10, paddingHorizontal: 10, marginTop: 7 }, homeToolIcon: { width: 31, height: 31, textAlign: 'center', textAlignVertical: 'center', overflow: 'hidden', borderRadius: 7, backgroundColor: theme.surfaceSoft, color: theme.navy, fontSize: 16, marginRight: 9 }, homeToolTitle: { color: colors.ink, fontSize: 10, fontWeight: '800' }, homeToolBody: { color: colors.muted, fontSize: 8, marginTop: 3 }, homeToolArrow: { color: theme.navy, fontSize: 20, marginLeft: 7 }, homeSosButton: { minHeight: 54, flexDirection: 'row', alignItems: 'center', backgroundColor: theme.redSoft, borderWidth: 1, borderColor: '#F0C8CD', borderRadius: 10, paddingHorizontal: 11, marginTop: 9 }, homeSosIcon: { color: theme.red, borderColor: '#E8B4BA', borderWidth: 1, borderRadius: 15, width: 26, height: 26, textAlign: 'center', textAlignVertical: 'center', overflow: 'hidden', fontWeight: '800', marginRight: 9 }, homeSosTitle: { color: theme.red, fontSize: 10, fontWeight: '800' }, homeSosBody: { color: '#9D5961', fontSize: 8, marginTop: 3 }, homeSosArrow: { color: theme.red, fontSize: 17 },
+  journeyFieldCard: { backgroundColor: theme.surface, borderRadius: 15, borderWidth: 1, borderColor: colors.line, padding: 15 }, fieldLabel: { color: colors.muted, fontSize: 9, fontWeight: '800', letterSpacing: 0.7, marginBottom: 7 }, locationField: { minHeight: 45, borderRadius: 10, borderWidth: 1, borderColor: colors.line, backgroundColor: theme.surface, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 11 }, locationFieldIcon: { color: theme.navy, fontSize: 17, marginRight: 8 }, locationFieldText: { color: colors.ink, fontSize: 11, flex: 1 }, journeyDestinationInput: { color: colors.ink, fontSize: 12, flex: 1, paddingVertical: 8 }, travelModeRow: { flexDirection: 'row', gap: 7, marginTop: 9 }, travelModeOption: { flex: 1, minHeight: 42, paddingHorizontal: 4, borderRadius: 10, borderWidth: 1, borderColor: colors.line, backgroundColor: theme.surface, alignItems: 'center', justifyContent: 'center' }, travelModeSelected: { borderColor: theme.navy, backgroundColor: theme.surfaceSoft }, travelModeText: { color: colors.muted, fontSize: 9, fontWeight: '700' }, travelModeTextSelected: { color: theme.navy, fontWeight: '800' }, shareJourneyCard: { flexDirection: 'row', alignItems: 'center', minHeight: 62, backgroundColor: theme.surface, borderRadius: 13, borderWidth: 1, borderColor: colors.line, paddingHorizontal: 13, marginTop: 14 }, estimateCard: { flexDirection: 'row', alignItems: 'center', minHeight: 58, backgroundColor: theme.surfaceSoft, borderRadius: 12, paddingHorizontal: 13, marginTop: 13 }, estimateIcon: { width: 30, color: theme.navy, fontSize: 19, textAlign: 'center', marginRight: 8 }, liveMapCard: { backgroundColor: theme.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 16, padding: 10, marginBottom: 4 }, liveMapHeading: { minHeight: 25, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 7 }, liveMapLabel: { color: theme.green, backgroundColor: theme.greenSoft, overflow: 'hidden', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 5, fontSize: 8, fontWeight: '800', letterSpacing: 0.4 }, liveMapUpdated: { color: colors.muted, fontSize: 9 }, arrivedButton: { minHeight: 48, backgroundColor: theme.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 11, alignItems: 'center', justifyContent: 'center', marginTop: 9 }, arrivedButtonText: { color: colors.ink, fontSize: 11, fontWeight: '800' },
   mapCard: { height: 234, borderRadius: 18, backgroundColor: '#E9E9E7', overflow: 'hidden', borderWidth: 1, borderColor: colors.line, padding: 15, justifyContent: 'space-between' }, mapGrid: { ...StyleSheet.absoluteFill, opacity: 0.4, backgroundColor: '#E9E9E7' }, mapRoadA: { position: 'absolute', height: 17, width: 340, backgroundColor: '#D9D9D6', top: 118, left: -55, transform: [{ rotate: '-22deg' }] }, mapRoadB: { position: 'absolute', height: 12, width: 330, backgroundColor: '#D9D9D6', top: 130, right: -150, transform: [{ rotate: '54deg' }] }, mapRoute: { position: 'absolute', height: 3, width: 175, backgroundColor: colors.teal, top: 123, left: 88, transform: [{ rotate: '-36deg' }], borderRadius: 4 }, mapTop: { flexDirection: 'row', alignItems: 'center', zIndex: 1 }, pulse: { height: 7, width: 7, borderRadius: 4, backgroundColor: colors.muted, marginRight: 7 }, pulseActive: { backgroundColor: colors.teal }, mapLive: { color: colors.ink, fontSize: 9, letterSpacing: 1.3, fontWeight: '800', flex: 1 }, mapTime: { color: colors.muted, fontSize: 9, letterSpacing: 1.2 }, mapPin: { position: 'absolute', top: 91, left: '55%', width: 34, height: 34, borderRadius: 18, borderWidth: 7, borderColor: '#D52B3740', backgroundColor: colors.teal, alignItems: 'center', justifyContent: 'center', zIndex: 2 }, pinText: { color: '#FFFFFF', fontSize: 10 }, mapCallout: { position: 'absolute', top: 52, left: 15, backgroundColor: '#FFFFFF', padding: 10, borderRadius: 10, zIndex: 2, borderWidth: 1, borderColor: colors.line }, calloutTitle: { color: colors.ink, fontSize: 10, fontWeight: '700' }, calloutText: { color: colors.muted, fontSize: 9, marginTop: 4 }, mapFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', zIndex: 1 }, coord: { color: colors.muted, fontSize: 9, letterSpacing: 1.2 }, mapArrow: { color: colors.teal, fontSize: 18 },
   mapLocationStatus: { color: colors.muted, fontSize: 10, textAlign: 'center', marginTop: 8, marginBottom: 8 },
   checkInCard: { backgroundColor: '#FFF3DC', borderWidth: 2, borderColor: '#C96912', borderRadius: 15, padding: 16, marginBottom: 15 }, checkInHeading: { color: '#8B3D0A', fontSize: 14, letterSpacing: 0.7, fontWeight: '900' }, checkInBody: { color: colors.ink, fontSize: 13, lineHeight: 19, marginTop: 8 }, checkInActions: { flexDirection: 'row', gap: 10, marginTop: 13 }, checkInSafeButton: { flex: 1, minHeight: 48, borderRadius: 10, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#C96912', alignItems: 'center', justifyContent: 'center' }, checkInSafeText: { color: '#6D330B', fontSize: 13, fontWeight: '800' }, checkInSosButton: { flex: 1, minHeight: 48, borderRadius: 10, backgroundColor: colors.red, alignItems: 'center', justifyContent: 'center' }, checkInSosText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
@@ -1060,10 +1201,11 @@ const styles = StyleSheet.create({
   thresholdOptions: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 9 }, thresholdOption: { borderWidth: 1, borderColor: colors.line, borderRadius: 9, paddingVertical: 8, paddingHorizontal: 11, backgroundColor: '#FFFFFF' }, thresholdOptionSelected: { backgroundColor: colors.ink, borderColor: colors.ink }, thresholdOptionText: { color: colors.ink, fontSize: 10, fontWeight: '700' }, thresholdOptionTextSelected: { color: '#FFFFFF' },
   statusRow: { flexDirection: 'row', gap: 8, marginTop: 13, marginBottom: 15 }, pill: { backgroundColor: colors.panel, borderRadius: 30, paddingHorizontal: 11, paddingVertical: 8, flexDirection: 'row', alignItems: 'center' }, pillDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.muted, marginRight: 7 }, pillDotOn: { backgroundColor: colors.teal }, pillText: { color: colors.ink, fontSize: 10 },
   inputCard: { padding: 16, backgroundColor: colors.panel, borderRadius: 15, borderWidth: 1, borderColor: colors.line, marginTop: 10 }, cardLabel: { color: colors.muted, fontSize: 9, letterSpacing: 1.35, fontWeight: '800', marginBottom: 10 }, input: { color: colors.ink, fontSize: 14, paddingVertical: 6 }, triggerDisplay: { color: colors.ink, fontSize: 14, fontWeight: '600' }, divider: { height: 1, backgroundColor: colors.line, marginVertical: 13 },
-  primaryButton: { marginTop: 16, backgroundColor: colors.teal, borderRadius: 13, height: 54, paddingHorizontal: 17, alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' }, stopButton: { backgroundColor: colors.panel2, borderWidth: 1, borderColor: colors.red }, primaryButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14 }, buttonArrow: { color: '#FFFFFF', fontSize: 23, fontWeight: '400' },
+  primaryButton: { marginTop: 16, backgroundColor: colors.teal, borderRadius: 13, height: 54, paddingHorizontal: 17, alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' }, stopButton: { backgroundColor: theme.navyDeep, borderWidth: 1, borderColor: theme.navyDeep }, primaryButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14 }, buttonArrow: { color: '#FFFFFF', fontSize: 23, fontWeight: '400' },
   sosButton: { marginTop: 11, borderRadius: 13, borderWidth: 1, borderColor: '#EDB7BC', backgroundColor: '#FCEEEF', paddingHorizontal: 14, height: 64, flexDirection: 'row', alignItems: 'center' }, sosIcon: { color: colors.red, borderColor: '#E8A2A8', borderWidth: 1, borderRadius: 20, height: 30, width: 30, textAlign: 'center', textAlignVertical: 'center', overflow: 'hidden', fontSize: 16, fontWeight: '700', marginRight: 12 }, sosCopy: { flex: 1 }, sosTitle: { color: colors.ink, fontSize: 12, fontWeight: '700' }, sosSub: { color: '#A54D55', fontSize: 9, marginTop: 4 }, sosArrow: { color: colors.red, fontSize: 20 }, privacyNote: { color: colors.muted, textAlign: 'center', fontSize: 10, lineHeight: 15, marginTop: 15, paddingHorizontal: 6 },
   emergencyCard: { backgroundColor: '#FCEEEF', borderRadius: 14, borderWidth: 1, borderColor: '#EDB7BC', padding: 15, marginBottom: 15 }, emergencyHeading: { color: colors.red, fontSize: 12, letterSpacing: 0.7, fontWeight: '900' }, emergencyBody: { color: colors.ink, fontSize: 12, lineHeight: 18, marginTop: 7 }, resolveButton: { backgroundColor: colors.red, borderRadius: 10, paddingHorizontal: 13, paddingVertical: 12, alignItems: 'center', marginTop: 12 }, resolveButtonDisabled: { opacity: 0.55 }, resolveButtonText: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
-  emptyText: { color: colors.muted, fontSize: 13, lineHeight: 20 }, contactRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomColor: colors.line, borderBottomWidth: 1 }, contactAvatar: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#FBEDEF', alignItems: 'center', justifyContent: 'center', marginRight: 10 }, contactInitial: { color: colors.teal, fontWeight: '800' }, contactName: { color: colors.ink, fontWeight: '700', fontSize: 13 }, contactPhone: { color: colors.muted, fontSize: 11, marginTop: 3 }, shareLink: { color: colors.teal, fontSize: 10, fontWeight: '700', marginTop: 7 }, remove: { color: colors.muted, fontSize: 22, paddingHorizontal: 5 }, secondaryButton: { marginTop: 10, padding: 14, alignItems: 'center' }, secondaryText: { color: colors.teal, fontWeight: '700', fontSize: 12 }, helper: { color: colors.muted, lineHeight: 18, fontSize: 11, marginTop: 7 }, noticeCard: { backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line, borderRadius: 14, marginTop: 14, padding: 14, flexDirection: 'row' }, noticeIcon: { color: colors.teal, fontSize: 17, marginRight: 11 }, noticeTitle: { color: colors.ink, fontSize: 12, fontWeight: '700' }, noticeBody: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 4 },
-  footer: { textAlign: 'center', color: colors.muted, fontSize: 8, letterSpacing: 1.6, marginTop: 29 }, tabBar: { height: 67, backgroundColor: '#FFFFFF', borderTopWidth: 1, borderTopColor: colors.line, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around' }, tabButton: { width: '25%', alignItems: 'center', justifyContent: 'center' }, tabIcon: { color: colors.muted, fontSize: 19 }, tabLabel: { color: colors.muted, fontSize: 9, marginTop: 2 }, tabSelected: { color: colors.red },
+  emptyText: { color: colors.muted, fontSize: 13, lineHeight: 20 }, contactRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomColor: colors.line, borderBottomWidth: 1 }, contactAvatar: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#FBEDEF', alignItems: 'center', justifyContent: 'center', marginRight: 10 }, contactInitial: { color: colors.teal, fontWeight: '800' }, contactName: { color: colors.ink, fontWeight: '700', fontSize: 13 }, contactPhone: { color: colors.muted, fontSize: 11, marginTop: 3 }, shareLink: { color: colors.teal, fontSize: 10, fontWeight: '700', marginTop: 7 }, removeAccess: { color: colors.red, fontSize: 10, fontWeight: '700', marginTop: 7 }, remove: { color: colors.muted, fontSize: 22, paddingHorizontal: 5 }, secondaryButton: { marginTop: 10, padding: 14, alignItems: 'center' }, secondaryText: { color: colors.teal, fontWeight: '700', fontSize: 12 }, helper: { color: colors.muted, lineHeight: 18, fontSize: 11, marginTop: 7 }, noticeCard: { backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line, borderRadius: 14, marginTop: 14, padding: 14, flexDirection: 'row' }, noticeIcon: { color: colors.teal, fontSize: 17, marginRight: 11 }, noticeTitle: { color: colors.ink, fontSize: 12, fontWeight: '700' }, noticeBody: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 4 },
+  profileTabs: { height: 40, flexDirection: 'row', backgroundColor: '#F5F7FA', borderColor: '#CBD3DD', borderWidth: 1, borderRadius: 9, padding: 1, marginBottom: 16 }, profileTab: { flex: 1, alignItems: 'center', justifyContent: 'center', borderRadius: 7 }, profileTabSelected: { backgroundColor: theme.navy }, profileTabText: { color: theme.navy, fontSize: 13, fontWeight: '700' }, profileTabTextSelected: { color: '#FFFFFF' }, profileAccountCard: { backgroundColor: '#F5F7FA', borderColor: '#CBD3DD', borderWidth: 1, borderRadius: 10, padding: 15, marginBottom: 16 }, profileName: { color: '#142B49', fontSize: 20, lineHeight: 26, fontWeight: '700' }, profileDetail: { color: '#617084', fontSize: 12, lineHeight: 17, marginTop: 3 },
+  footer: { textAlign: 'center', color: colors.muted, fontSize: 8, letterSpacing: 1.6, marginTop: 29 }, tabBar: { height: 67, backgroundColor: '#FFFFFF', borderTopWidth: 1, borderTopColor: colors.line, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around' }, tabButton: { width: '25%', alignItems: 'center', justifyContent: 'center' }, tabIcon: { color: colors.muted, fontSize: 19 }, tabLabel: { color: colors.muted, fontSize: 9, marginTop: 2 }, tabSelected: { color: theme.navy },
 });
 

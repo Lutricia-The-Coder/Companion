@@ -69,3 +69,7 @@ node_modules/
 
 # Expo generated files
 .expo/
+
+# Local device captures and build caches
+/tmp/
+/artifacts/

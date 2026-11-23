@@ -1,5 +1,5 @@
-import CompanionApp from '../../App';
+import AuthenticatedCompanionScreen from '../components/AuthenticatedCompanionScreen';
 
 export default function PeopleScreen() {
-  return <CompanionApp screen="people" />;
+  return <AuthenticatedCompanionScreen screen="people" />;
 }

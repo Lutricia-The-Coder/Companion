@@ -11,13 +11,23 @@
 <body>
   <main class="shell">
     <header class="topbar"><a class="brand" href="./">COMPANION <span>●</span></a><div class="account-tools"><div id="account" class="account">Not signed in</div><button id="sign-out" class="button secondary sign-out" type="button" hidden>Sign out</button></div></header>
-    <section class="intro"><div class="eyebrow">TRUSTED CONTACT DASHBOARD</div><h1>Stay close to<br />their journey.</h1><p>Sign in with the account the journey owner authorized. Location only appears for journeys shared with you.</p></section>
+    <section class="intro" id="intro"><div class="eyebrow">TRUSTED CONTACT DASHBOARD</div><h1>Stay close to<br />their journey.</h1><p>Sign in with the account the journey owner authorized. Location only appears for journeys shared with you.</p></section>
+    <div id="message" class="message" role="status" aria-live="polite"></div>
     <section class="auth-card" id="auth-card">
       <div class="card-title">SIGN IN OR CREATE A CONTACT ACCOUNT</div>
       <label>Email<input id="email" type="email" autocomplete="email" placeholder="you@example.com" /></label>
       <label>Password<input id="password" type="password" autocomplete="current-password" placeholder="At least 8 characters" /></label>
       <div class="actions"><button id="sign-in" class="button primary">Sign in</button><button id="sign-up" class="button secondary">Create account</button></div>
-      <div id="message" class="message" role="status"></div>
+      <div class="oauth-divider"><span></span><small>OR</small><span></span></div>
+      <button id="sign-google" class="button google-button" type="button"><strong>G</strong> Continue with Google</button>
+    </section>
+    <section class="auth-card" id="recovery-card" hidden>
+      <div class="card-title">ACCOUNT RECOVERY</div>
+      <h2 class="recovery-title">Choose a new password</h2>
+      <p id="recovery-help" class="recovery-help">Verifying your secure recovery link…</p>
+      <label>New password<input id="new-password" type="password" autocomplete="new-password" placeholder="At least 8 characters" /></label>
+      <label>Confirm new password<input id="confirm-password" type="password" autocomplete="new-password" placeholder="Enter it again" /></label>
+      <button id="update-password" class="button primary" type="button" disabled>Update password</button>
     </section>
     <section class="journey-card" id="journey-card" hidden>
       <div class="journey-heading"><div><div class="card-title">LIVE JOURNEY</div><h2 id="journey-title">Waiting for a journey</h2></div><div id="status" class="status">—</div></div>

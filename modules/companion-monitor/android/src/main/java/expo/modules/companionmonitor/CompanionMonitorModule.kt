@@ -107,6 +107,14 @@ class CompanionMonitorModule : Module() {
       val context = appContext.reactContext?.applicationContext
         ?: throw IllegalStateException("Application context is unavailable.")
       val prefs = context.getSharedPreferences(CompanionMonitorService.PREFS, Context.MODE_PRIVATE)
+      val evaluationFile = File(context.filesDir, CompanionMonitorService.AUDIO_EVALUATION_FILENAME)
+      val lastEvaluationTimestamp = if (evaluationFile.exists()) {
+        evaluationFile.useLines { lines ->
+          lines.drop(1).lastOrNull { it.isNotBlank() }
+            ?.split(',')?.getOrNull(4)?.toLongOrNull()?.toDouble()
+        }
+      } else null
+      val evaluationRows = prefs.getInt("audioEvaluationRowsWritten", 0)
       mapOf(
         "running" to prefs.getBoolean("running", false),
         "lastSignal" to prefs.getString("lastSignal", null),
@@ -114,6 +122,12 @@ class CompanionMonitorModule : Module() {
         "emergencyPending" to prefs.getBoolean("emergencyPending", false),
         "audioMonitoring" to prefs.getBoolean("audioMonitoringActive", false),
         "motionMonitoring" to prefs.getBoolean("motionMonitoringEnabled", true),
+        "audioEvaluationLogging" to prefs.getBoolean("audioEvaluationLogging", false),
+        "audioEvaluationRowsWritten" to evaluationRows,
+        "audioEvaluationLogBytes" to evaluationFile.length().toDouble(),
+        "audioEvaluationLimitReached" to (evaluationRows >= CompanionMonitorService.MAX_AUDIO_EVALUATION_ROWS
+          || evaluationFile.length() >= CompanionMonitorService.MAX_AUDIO_EVALUATION_BYTES),
+        "audioEvaluationLastTimestampMs" to lastEvaluationTimestamp,
       )
     }
   }

@@ -6,6 +6,7 @@ import { requireSupabase } from '../lib/supabase';
 const MAX_EVIDENCE_BYTES = 25 * 1024 * 1024;
 const ALLOWED_TYPES = new Set(['audio/mp4', 'audio/m4a', 'video/mp4']);
 export const EVIDENCE_OUTBOX_KEY = 'companion-emergency-evidence-outbox-v1';
+export const EVIDENCE_RETENTION_KEY = 'companion-evidence-retention-days';
 const LEGACY_AUDIO_KEY = 'companion-emergency-audio-evidence-v1';
 const MAX_UPLOAD_ATTEMPTS = 8;
 const MAX_OUTBOX_RECORDS = 50;
@@ -89,6 +90,7 @@ export async function enqueueEmergencyEvidence(input: {
   eventId: string;
   type: 'audio' | 'video';
   durationSeconds: number;
+  recordedAt?: number;
 }) {
   const records = await readOutbox();
   const existing = records.find((record) => record.eventId === input.eventId && record.type === input.type);
@@ -101,13 +103,17 @@ export async function enqueueEmergencyEvidence(input: {
   const source = new File(input.uri);
   const destination = new File(directory, `${evidenceId}.${extension}`);
   await source.copy(destination);
+  const recordedAt = input.recordedAt ?? Date.now();
+  const configuredRetention = Number(await AsyncStorage.getItem(EVIDENCE_RETENTION_KEY));
+  const retentionDays = configuredRetention === 7 || configuredRetention === 90 ? configuredRetention : 30;
   const record: EvidenceOutboxRecord = {
     ...input,
     uri: destination.uri,
     evidenceId,
-    recordedAt: Date.now(),
+    recordedAt,
     uploadAttempts: 0,
     uploadStatus: 'pending',
+    expiresAt: recordedAt + retentionDays * 24 * 60 * 60_000,
   };
   try {
     await writeOutbox([...records, record]);
@@ -196,6 +202,7 @@ export async function uploadPendingEmergencyEvidence(options: {
           evidenceId: record.evidenceId,
           type: record.type,
           durationSeconds: record.durationSeconds,
+          recordedAt: record.recordedAt,
         });
         records = records.map((item) => item.evidenceId === record.evidenceId
           ? { ...item, uploadStatus: 'uploaded', expiresAt: result.expiresAt, notificationStatus: result.notifications?.status, nextUploadAt: undefined }
@@ -230,6 +237,7 @@ export async function uploadEmergencyEvidence(input: {
   evidenceId?: string;
   type: 'audio' | 'video';
   durationSeconds: number;
+  recordedAt: number;
 }) {
   const client = requireSupabase();
   if (!Number.isFinite(input.durationSeconds) || input.durationSeconds <= 0 || input.durationSeconds > 30) {
@@ -237,16 +245,17 @@ export async function uploadEmergencyEvidence(input: {
   }
   const { data: { user } } = await client.auth.getUser();
   if (!user) throw new Error('Sign in before uploading evidence.');
-  const response = await fetch(input.uri);
-  if (!response.ok) throw new Error('Could not read the local evidence file.');
-  const blob = await response.blob();
+  const file = new File(input.uri);
+  if (!file.exists) throw new Error('Could not read the local evidence file.');
   const contentType = input.type === 'video' ? 'video/mp4' : 'audio/mp4';
-  if (!ALLOWED_TYPES.has(contentType) || blob.size <= 0 || blob.size > MAX_EVIDENCE_BYTES) {
+  const sizeBytes = file.size;
+  if (!ALLOWED_TYPES.has(contentType) || sizeBytes <= 0 || sizeBytes > MAX_EVIDENCE_BYTES) {
     throw new Error('Evidence file type or size is not allowed.');
   }
+  const fileContents = await file.arrayBuffer();
   const evidenceId = input.evidenceId ?? randomUUID();
   const objectPath = `${user.id}/${input.journeyId}/${input.eventId}/${evidenceId}`;
-  const { error: uploadError } = await client.storage.from('evidence').upload(objectPath, await blob.arrayBuffer(), {
+  const { error: uploadError } = await client.storage.from('evidence').upload(objectPath, fileContents, {
     contentType,
     upsert: false,
   });
@@ -261,7 +270,8 @@ export async function uploadEmergencyEvidence(input: {
       objectPath,
       contentType,
       durationSeconds: input.durationSeconds,
-      sizeBytes: blob.size,
+      recordedAt: input.recordedAt,
+      sizeBytes,
     },
   });
   if (error) {

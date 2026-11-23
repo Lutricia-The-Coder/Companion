@@ -1,5 +1,5 @@
-import CompanionApp from '../../App';
+import AuthenticatedCompanionScreen from '../components/AuthenticatedCompanionScreen';
 
 export default function SettingsScreen() {
-  return <CompanionApp screen="settings" />;
+  return <AuthenticatedCompanionScreen screen="settings" />;
 }

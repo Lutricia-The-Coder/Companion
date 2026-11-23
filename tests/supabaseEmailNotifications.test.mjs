@@ -25,7 +25,10 @@ test('email delivery retries transient failures and returns provider acceptance'
     if (calls < 3) throw new Error('temporary provider error');
     return { id: 'email-123' };
   }, async (ms) => delays.push(ms));
-  assert.deepEqual(result, { accepted: true, status: 'accepted', attempts: 3, providerResponse: { id: 'email-123' } });
+  assert.equal(result.accepted, true);
+  assert.equal(result.status, 'accepted');
+  assert.equal(result.attempts, 3);
+  assert.deepEqual(result.providerResponse, { id: 'email-123' });
   assert.deepEqual(delays, [400, 800]);
 });
 
@@ -36,7 +39,11 @@ test('email delivery stops after three failures and reports the final provider e
     throw new Error('provider unavailable');
   }, async () => undefined);
   assert.equal(calls, 3);
-  assert.deepEqual(result, { accepted: false, status: 'failed', attempts: 3, error: 'provider unavailable' });
+  assert.equal(result.accepted, false);
+  assert.equal(result.status, 'unknown');
+  assert.equal(result.attempts, 3);
+  assert.equal(result.retryable, true);
+  assert.equal(result.error, 'Email provider request failed.');
 });
 
 test('Resend request uses a stable idempotency key and records the provider reference', async () => {

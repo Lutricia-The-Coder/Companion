@@ -1,4 +1,4 @@
-import { clients, response, uuid, notifyContacts } from '../_shared/common.ts';
+import { clients, response, uuid, notifyContacts, readJsonBody } from '../_shared/common.ts';
 
 Deno.serve(async (request) => {
   if (request.method === 'OPTIONS') return response({ ok: true });
@@ -6,7 +6,9 @@ Deno.serve(async (request) => {
   const { user, admin } = clients(request);
   const { data: { user: actor }, error: authError } = await user.auth.getUser();
   if (authError || !actor) return response({ error: 'Sign in required' }, 401);
-  const input = await request.json().catch(() => ({}));
+  const body = await readJsonBody(request);
+  if (body.error) return response({ error: body.error }, 400);
+  const input = body.value!;
   const point = input.location;
   if (!uuid(input.journeyId) || !point || !Number.isFinite(point.latitude) || Math.abs(point.latitude) > 90
     || !Number.isFinite(point.longitude) || Math.abs(point.longitude) > 180 || !Number.isFinite(point.timestamp)
@@ -19,7 +21,7 @@ Deno.serve(async (request) => {
     p_location: point,
     p_distance_meters: input.distanceMeters,
   });
-  if (error) return response({ error: error.message }, 403);
+  if (error) return response({ error: error.message.includes('rate limit') ? 'Too many route alerts. Try again later.' : error.message }, error.message.includes('rate limit') ? 429 : 403);
   if (data.duplicate || !data.eventId) return response(data);
   const notifications = await notifyContacts(admin, input.journeyId, data.eventId, 'Route deviation alert', `The active journey appears about ${input.distanceMeters} m from its planned route`, point, 'route_deviation');
   return response({ ...data, notifications });

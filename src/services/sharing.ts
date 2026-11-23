@@ -9,10 +9,25 @@ export async function grantTrustedContactAccess(journeyId: string, contactEmail:
   return { contactUid: contactUid as string, monitorPath: `/monitor/${journeyId}` };
 }
 
+export async function revokeTrustedContactAccess(journeyId: string, contactEmail: string) {
+  const { data, error } = await requireSupabase().rpc('revoke_journey_access', {
+    p_journey_id: journeyId,
+    p_contact_email: contactEmail.trim().toLowerCase(),
+  });
+  if (error) throw error;
+  return data === true;
+}
+
 export async function activateEmergency(journeyId: string, reason = 'Manual SOS') {
   const { data, error } = await requireSupabase().functions.invoke('activate-emergency', { body: { journeyId, reason } });
   if (error) throw error;
-  return data as { eventId: string | null; duplicate?: boolean; status?: string };
+  return data as {
+    eventId: string | null;
+    duplicate?: boolean;
+    status?: string;
+    retryable?: boolean;
+    notifications?: { status?: string; accepted?: number; failures?: number; unknown?: number; retryable?: boolean };
+  };
 }
 
 export async function resolveEmergency(journeyId: string, eventId: string) {

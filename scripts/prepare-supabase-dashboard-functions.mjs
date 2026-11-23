@@ -9,15 +9,14 @@ const outputRoot = path.join(root, 'tmp', 'supabase-dashboard-functions');
 const stripImports = (source) => source.replace(/^import\s+.*?;\s*\r?\n/gm, '');
 
 const emailSource = stripImports(await readFile(path.join(functionsRoot, '_shared', 'emailNotifications.ts'), 'utf8'));
+const expoPushSource = (await readFile(path.join(functionsRoot, '_shared', 'expoPush.mjs'), 'utf8')).trim();
 const commonSource = (await readFile(path.join(functionsRoot, '_shared', 'common.ts'), 'utf8'))
-  .replace("import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';", "import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';")
-  .replace(/^import\s+.*?;\s*\r?\n/m, '')
-  .replace("import { emailTargets, retryEmailDelivery, sendResendEmail } from './emailNotifications.ts';", '')
+  .replace(/^import\s+.*?;\s*\r?\n/gm, '')
   .trim();
 
 await mkdir(outputRoot, { recursive: true });
 
-for (const name of ['activate-emergency', 'report-route-deviation', 'register-evidence']) {
+for (const name of ['activate-emergency', 'report-route-deviation', 'register-evidence', 'get-evidence-download-url', 'delete-evidence', 'cleanup-expired-evidence', 'delete-account']) {
   const entry = stripImports(await readFile(path.join(functionsRoot, name, 'index.ts'), 'utf8')).trim();
   const output = [
     `// Generated from supabase/functions/${name}/index.ts and _shared sources.`,
@@ -25,6 +24,7 @@ for (const name of ['activate-emergency', 'report-route-deviation', 'register-ev
     '// Do not add credentials to this source.',
     "import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';",
     emailSource.trim(),
+    expoPushSource,
     commonSource,
     entry,
     '',
@@ -36,4 +36,4 @@ for (const name of ['activate-emergency', 'report-route-deviation', 'register-ev
   await writeFile(path.join(outputRoot, `${name}.ts`), output, 'utf8');
 }
 
-process.stdout.write(`Prepared 3 self-contained Dashboard function files in ${outputRoot}\n`);
+process.stdout.write(`Prepared 7 self-contained Dashboard function files in ${outputRoot}\n`);

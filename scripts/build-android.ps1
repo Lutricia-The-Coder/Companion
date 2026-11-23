@@ -1,6 +1,9 @@
 param(
   [ValidateSet('physical', 'physical-32bit', 'emulator')]
-  [string]$BuildTarget = 'physical'
+  [string]$BuildTarget = 'physical',
+  [ValidateSet('debug', 'release')]
+  [string]$BuildVariant = 'release',
+  [switch]$SkipPrebuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,32 +58,46 @@ $architectures = switch ($BuildTarget) {
   default { 'arm64-v8a' }
 }
 
-Write-Host "Building Android debug APK for $BuildTarget device architectures: $architectures"
+Write-Host "Building Android $BuildVariant APK for $BuildTarget device architectures: $architectures"
 
-Write-Host 'Regenerating Android native project from app.json and config plugins.'
-$previousExpoGitStatus = $env:EXPO_NO_GIT_STATUS
-$env:EXPO_NO_GIT_STATUS = '1'
-try {
-  & npx.cmd expo prebuild --platform android --clean --no-install
-  $prebuildExitCode = $LASTEXITCODE
-} finally {
-  if ($null -eq $previousExpoGitStatus) { Remove-Item Env:EXPO_NO_GIT_STATUS -ErrorAction SilentlyContinue }
-  else { $env:EXPO_NO_GIT_STATUS = $previousExpoGitStatus }
-}
-if ($prebuildExitCode -ne 0) {
-  throw 'Expo prebuild failed; Android native project was not rebuilt.'
+if ($SkipPrebuild) {
+  Write-Host 'Keeping the existing generated Android project for an incremental JS/native build.'
+} else {
+  Write-Host 'Regenerating Android native project from app.json and config plugins.'
+  $previousExpoGitStatus = $env:EXPO_NO_GIT_STATUS
+  $env:EXPO_NO_GIT_STATUS = '1'
+  try {
+    & npx.cmd expo prebuild --platform android --clean --no-install
+    $prebuildExitCode = $LASTEXITCODE
+  } finally {
+    if ($null -eq $previousExpoGitStatus) { Remove-Item Env:EXPO_NO_GIT_STATUS -ErrorAction SilentlyContinue }
+    else { $env:EXPO_NO_GIT_STATUS = $previousExpoGitStatus }
+  }
+  if ($prebuildExitCode -ne 0) {
+    throw 'Expo prebuild failed; Android native project was not rebuilt.'
+  }
 }
 
+$gradleTask = if ($BuildVariant -eq 'release') { ':app:assembleRelease' } else { ':app:assembleDebug' }
 $arguments = @(
   '--no-daemon',
   '-I', (Join-Path $PSScriptRoot 'windows-app-cmake.gradle'),
   '-p', (Join-Path $PSScriptRoot '..\android'),
-  'assembleDebug',
+  $gradleTask,
   '--max-workers=2',
   "-PreactNativeArchitectures=$architectures"
 )
+if ($BuildVariant -eq 'release') {
+  # Release minification is configured by expo-build-properties in app.json.
+  # Passing -Pandroid.enableMinifyInReleaseBuilds here shadows the Android
+  # project extension used by Expo modules during Gradle configuration.
+}
 $exitCode = Invoke-GradleWithShortHome `
   -WrapperPath (Join-Path $PSScriptRoot '..\android\gradlew.bat') `
   -GradleHome 'C:\g' `
   -Arguments $arguments
+if ($exitCode -eq 0) {
+  $apkPath = Join-Path $PSScriptRoot "..\android\app\build\outputs\apk\$BuildVariant\app-$BuildVariant.apk"
+  Write-Host "APK ready: $apkPath"
+}
 exit $exitCode
