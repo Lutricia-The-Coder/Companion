@@ -15,12 +15,12 @@ export default function AuthenticatedCompanionScreen({ screen }: { screen: 'home
     void supabase.auth.getSession().then(({ data: { session } }) => {
       if (!alive) return;
       if (session?.user) setReady(true);
-      else router.replace('/register');
+      else router.replace('/login');
     });
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!alive) return;
       if (session?.user) setReady(true);
-      else router.replace('/register');
+      else router.replace('/login');
     });
     return () => { alive = false; subscription.unsubscribe(); };
   }, [router]);

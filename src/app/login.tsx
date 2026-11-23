@@ -6,13 +6,12 @@ import { supabase, supabaseReady } from '../lib/supabase';
 import { startGoogleOAuth } from '../services/oauth';
 import { theme } from '../theme';
 
-const C = { bg: theme.background, panel: theme.surface, ink: theme.ink, muted: theme.muted, teal: theme.navy, line: theme.line };
-
 export default function LoginScreen() {
   const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
+
   const login = async () => {
     if (!supabase || !supabaseReady) {
       Alert.alert('Supabase setup needed', 'Add your Supabase URL and publishable key to .env.');
@@ -29,6 +28,7 @@ export default function LoginScreen() {
       setBusy(false);
     }
   };
+
   const loginWithGoogle = async () => {
     if (!supabase || !supabaseReady) {
       Alert.alert('Supabase setup needed', 'Add your Supabase URL and publishable key to .env.');
@@ -45,17 +45,95 @@ export default function LoginScreen() {
       setBusy(false);
     }
   };
-  return <SafeAreaView style={s.safe}><KeyboardAvoidingView style={s.safe} behavior={Platform.OS === 'ios' ? 'padding' : undefined}><ScrollView contentContainerStyle={s.page} keyboardShouldPersistTaps="handled">
-    <TouchableOpacity onPress={() => router.back()}><Text style={s.back}>←  BACK</Text></TouchableOpacity>
-    <Text style={s.eyebrow}>WELCOME BACK</Text><Text style={s.title}>Sign in to{ '\n' }your safety account.</Text>
-    <View style={s.card}><Text style={s.label}>EMAIL ADDRESS</Text><TextInput value={email} onChangeText={setEmail} placeholder="you@example.com" autoCapitalize="none" keyboardType="email-address" placeholderTextColor={C.muted} style={s.input} /><View style={s.divider} /><Text style={s.label}>PASSWORD</Text><TextInput value={password} onChangeText={setPassword} placeholder="Password" secureTextEntry placeholderTextColor={C.muted} style={s.input} /></View>
-    <View style={s.assurance}><Text style={s.assuranceTitle}>A safe place to explore.</Text><Text style={s.assuranceBody}>Your account keeps your safety settings and approved contacts together.</Text></View>
-    <TouchableOpacity style={s.button} onPress={login} disabled={busy}><Text style={s.buttonText}>{busy ? 'Signing in…' : 'Sign in'}</Text><Text style={s.arrow}>→</Text></TouchableOpacity>
-    <TouchableOpacity style={s.link} onPress={() => router.push('/forgot-password' as never)}><Text style={s.linkText}>Forgot your password?</Text></TouchableOpacity>
-    <View style={s.separator}><View style={s.rule} /><Text style={s.or}>OR</Text><View style={s.rule} /></View>
-    <TouchableOpacity style={s.googleButton} onPress={loginWithGoogle} disabled={busy} accessibilityRole="button"><Text style={s.googleMark}>G</Text><Text style={s.googleText}>{busy ? 'Connecting to Google…' : 'Continue with Google'}</Text></TouchableOpacity>
-    <TouchableOpacity style={s.link} onPress={() => router.replace('/register')}><Text style={s.linkText}>New to Companion? Create an account</Text></TouchableOpacity>
-  </ScrollView></KeyboardAvoidingView></SafeAreaView>;
+
+  return <SafeAreaView style={styles.safe}>
+    <KeyboardAvoidingView style={styles.safe} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled">
+        <View style={styles.brandRow}>
+          <View style={styles.brandMark}><Text style={styles.brandCheck}>✓</Text></View>
+          <Text style={styles.brand}>Companion</Text>
+        </View>
+        <Text style={styles.tagline}>YOUR EVERYDAY SAFETY COMPANION</Text>
+
+        <View style={styles.form}>
+          <Text style={styles.title}>Welcome back</Text>
+          <Text style={styles.description}>Sign in to your safety circle.</Text>
+
+          <Text style={styles.label}>Email address</Text>
+          <TextInput
+            value={email}
+            onChangeText={setEmail}
+            placeholder="alex.morgan@university.edu"
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="email-address"
+            placeholderTextColor={theme.muted}
+            style={styles.input}
+            accessibilityLabel="Email address"
+            returnKeyType="next"
+          />
+
+          <View style={styles.passwordLabelRow}>
+            <Text style={styles.label}>Password</Text>
+            <TouchableOpacity onPress={() => router.push('/forgot-password' as never)} accessibilityRole="link">
+              <Text style={styles.forgotLink}>Forgot password?</Text>
+            </TouchableOpacity>
+          </View>
+          <TextInput
+            value={password}
+            onChangeText={setPassword}
+            placeholder="Enter your password"
+            secureTextEntry
+            placeholderTextColor={theme.muted}
+            style={styles.input}
+            accessibilityLabel="Password"
+            returnKeyType="go"
+            onSubmitEditing={() => void login()}
+          />
+
+          <TouchableOpacity style={[styles.primaryButton, busy && styles.disabled]} onPress={() => void login()} disabled={busy} accessibilityRole="button">
+            <Text style={styles.primaryButtonText}>{busy ? 'Signing in…' : 'Log in'}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.secondaryButton} onPress={() => router.push('/register')} accessibilityRole="button">
+            <Text style={styles.secondaryButtonText}>Create an account</Text>
+          </TouchableOpacity>
+
+          <View style={styles.separator}><View style={styles.rule} /><Text style={styles.or}>OR</Text><View style={styles.rule} /></View>
+          <TouchableOpacity style={styles.googleButton} onPress={() => void loginWithGoogle()} disabled={busy} accessibilityRole="button">
+            <Text style={styles.googleMark}>G</Text><Text style={styles.googleText}>{busy ? 'Connecting to Google…' : 'Continue with Google'}</Text>
+          </TouchableOpacity>
+          <Text style={styles.privacy}>Your location is shared only with people you choose.</Text>
+        </View>
+      </ScrollView>
+    </KeyboardAvoidingView>
+  </SafeAreaView>;
 }
 
-const s = StyleSheet.create({ safe: { flex: 1, backgroundColor: C.bg }, page: { padding: 23, paddingBottom: 40 }, back: { color: C.muted, fontSize: 10, letterSpacing: 1.1, paddingVertical: 8 }, eyebrow: { color: C.teal, letterSpacing: 1.7, fontSize: 10, fontWeight: '800', marginTop: 17 }, title: { color: C.ink, fontSize: 33, lineHeight: 38, fontWeight: '800', marginTop: 15 }, card: { backgroundColor: C.panel, borderRadius: 15, borderWidth: 1, borderColor: C.line, padding: 15, marginTop: 25 }, label: { color: C.muted, fontSize: 8, letterSpacing: 1.1, fontWeight: '800', marginTop: 7 }, input: { color: C.ink, fontSize: 13, minHeight: 43, borderBottomWidth: 1, borderBottomColor: C.line, paddingVertical: 8 }, divider: { height: 1, backgroundColor: C.line, marginVertical: 10 }, assurance: { backgroundColor: theme.navy, padding: 15, borderRadius: 14, marginTop: 18 }, assuranceTitle: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' }, assuranceBody: { color: '#DCE6EE', fontSize: 11, lineHeight: 16, marginTop: 5 }, button: { marginTop: 16, height: 53, borderRadius: 13, backgroundColor: C.teal, paddingHorizontal: 17, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, buttonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14 }, arrow: { color: '#FFFFFF', fontSize: 22 }, separator: { flexDirection: 'row', alignItems: 'center', gap: 12, marginVertical: 16 }, rule: { height: 1, flex: 1, backgroundColor: C.line }, or: { color: C.muted, fontSize: 9, fontWeight: '700' }, googleButton: { minHeight: 50, borderRadius: 12, borderWidth: 1, borderColor: C.line, backgroundColor: '#FFFFFF', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 11 }, googleMark: { color: '#4285F4', fontWeight: '900', fontSize: 17 }, googleText: { color: C.ink, fontSize: 12, fontWeight: '700' }, link: { padding: 15, alignItems: 'center' }, linkText: { color: C.teal, fontWeight: '700', fontSize: 12 } });
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: '#FFFFFF' },
+  page: { flexGrow: 1, paddingHorizontal: 24, paddingTop: 16, paddingBottom: 28 },
+  brandRow: { flexDirection: 'row', alignItems: 'center', gap: 9 },
+  brandMark: { width: 23, height: 23, borderRadius: 7, borderWidth: 1.5, borderColor: theme.navy, alignItems: 'center', justifyContent: 'center' },
+  brandCheck: { color: theme.navy, fontSize: 14, fontWeight: '700' },
+  brand: { color: theme.ink, fontSize: 17, fontWeight: '800', letterSpacing: -0.3 },
+  tagline: { color: theme.muted, fontSize: 9, letterSpacing: 0.6, marginTop: 10 },
+  form: { flex: 1, justifyContent: 'center', paddingBottom: 12 },
+  title: { color: theme.ink, fontSize: 22, lineHeight: 28, fontWeight: '800', marginBottom: 48 },
+  description: { color: theme.muted, fontSize: 12, marginBottom: 20 },
+  label: { color: theme.ink, fontSize: 10, fontWeight: '600', marginBottom: 7 },
+  passwordLabelRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 13 },
+  forgotLink: { color: theme.navy, fontSize: 10, fontWeight: '700', paddingVertical: 5 },
+  input: { minHeight: 47, borderRadius: 9, borderWidth: 1, borderColor: '#D5D9DE', backgroundColor: '#FFFFFF', color: theme.ink, fontSize: 12, paddingHorizontal: 12 },
+  primaryButton: { height: 50, borderRadius: 9, backgroundColor: theme.navyDeep, alignItems: 'center', justifyContent: 'center', marginTop: 21 },
+  primaryButtonText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
+  secondaryButton: { height: 45, borderRadius: 9, borderWidth: 1, borderColor: '#D5D9DE', backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center', marginTop: 9 },
+  secondaryButtonText: { color: theme.ink, fontSize: 11, fontWeight: '600' },
+  disabled: { opacity: 0.6 },
+  separator: { flexDirection: 'row', alignItems: 'center', gap: 12, marginVertical: 15 },
+  rule: { height: 1, flex: 1, backgroundColor: theme.line },
+  or: { color: theme.muted, fontSize: 9, fontWeight: '700' },
+  googleButton: { minHeight: 43, borderRadius: 9, borderWidth: 1, borderColor: '#D5D9DE', backgroundColor: '#FFFFFF', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
+  googleMark: { color: '#4285F4', fontWeight: '900', fontSize: 15 },
+  googleText: { color: theme.ink, fontSize: 11, fontWeight: '600' },
+  privacy: { color: theme.muted, fontSize: 9, textAlign: 'center', marginTop: 17 },
+});
