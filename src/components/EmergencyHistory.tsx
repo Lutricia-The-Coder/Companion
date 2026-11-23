@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useAudioPlayer } from 'expo-audio';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { ActivityIndicator, Alert, Linking, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { supabase, supabaseReady } from '../lib/supabase';
 import { deleteEmergencyEvidence, deleteLocalEmergencyEvidence, loadEvidenceOutbox, requestEvidenceDownload, uploadPendingEmergencyEvidence, type EvidenceOutboxRecord } from '../services/evidence';
@@ -108,6 +109,23 @@ export default function EmergencyHistory() {
     <Text style={s.title}>Journey history</Text>
     <Text style={s.subtitle}>Your past journeys, in one place.</Text>
     <TouchableOpacity style={s.refresh} onPress={() => setReload((value) => value + 1)} accessibilityRole="button"><Text style={s.refreshText}>Refresh history</Text></TouchableOpacity>
+    {evidence.length > 0 ? <View style={s.evidenceSection}>
+      <Text style={s.evidenceHeading}>Evidence on this device</Text>
+      <Text style={s.meta}>Local files are removed at their selected retention deadline. Uploaded files stay in private storage and are available only to authorized journey viewers until server expiry.</Text>
+      {evidence.some((item) => item.uploadStatus !== 'uploaded') ? <TouchableOpacity style={s.refresh} disabled={retryingUploads} onPress={() => {
+        setRetryingUploads(true);
+        void uploadPendingEmergencyEvidence({ retryFailed: true, retryNow: true }).then(async (result) => {
+          setEvidence(await loadEvidenceOutbox());
+          const summary = result.uploaded > 0
+            ? `${result.uploaded} evidence file${result.uploaded === 1 ? '' : 's'} uploaded privately.`
+            : result.errors.length > 0
+              ? result.errors.join('\n')
+              : 'No queued files were eligible to upload. Check that you are signed in and the recording belongs to a journey.';
+          Alert.alert(result.uploaded > 0 ? 'Upload retry complete' : 'Upload could not complete', summary);
+        }).catch((cause) => Alert.alert('Upload retry failed', cause instanceof Error ? cause.message : 'Try again when connected.')).finally(() => setRetryingUploads(false));
+      }}><Text style={s.refreshText}>{retryingUploads ? 'Retrying…' : 'Retry evidence uploads'}</Text></TouchableOpacity> : null}
+      {evidence.map((item) => <LocalEvidenceCard key={item.evidenceId} item={item} onDeleted={async () => setEvidence(await loadEvidenceOutbox())} />)}
+    </View> : null}
     {loading ? <View style={s.state}><ActivityIndicator color={C.teal} /><Text style={s.stateText}>Loading journey history…</Text></View>
       : error ? <View style={s.state}><Text style={s.error}>{error}</Text></View>
         : journeys.length === 0 ? <View style={s.state}><Text style={s.stateText}>No journeys have been recorded on this account.</Text></View>
@@ -129,38 +147,33 @@ export default function EmergencyHistory() {
           </View>)}
           <Text style={s.meta}>Only completed journeys appear in your history.</Text>
           </>}
-    {evidence.length > 0 ? <View style={s.evidenceSection}>
-      <Text style={s.evidenceHeading}>Evidence on this device</Text>
-      <Text style={s.meta}>Local files are removed at their selected retention deadline. Uploaded files stay in private storage and are available only to authorized journey viewers until server expiry.</Text>
-      {evidence.some((item) => item.uploadStatus !== 'uploaded') ? <TouchableOpacity style={s.refresh} disabled={retryingUploads} onPress={() => {
-        setRetryingUploads(true);
-        void uploadPendingEmergencyEvidence({ retryFailed: true, retryNow: true }).then(async (result) => {
-          setEvidence(await loadEvidenceOutbox());
-          const summary = result.uploaded > 0
-            ? `${result.uploaded} evidence file${result.uploaded === 1 ? '' : 's'} uploaded privately.`
-            : result.errors.length > 0
-              ? result.errors.join('\n')
-              : 'No queued files were eligible to upload. Check that you are signed in and the recording belongs to a journey.';
-          Alert.alert(result.uploaded > 0 ? 'Upload retry complete' : 'Upload could not complete', summary);
-        }).catch((cause) => Alert.alert('Upload retry failed', cause instanceof Error ? cause.message : 'Try again when connected.')).finally(() => setRetryingUploads(false));
-      }}><Text style={s.refreshText}>{retryingUploads ? 'Retrying…' : 'Retry evidence uploads'}</Text></TouchableOpacity> : null}
-      {evidence.map((item) => <LocalEvidenceCard key={item.evidenceId} item={item} onDeleted={async () => setEvidence(await loadEvidenceOutbox())} />)}
-    </View> : null}
   </View>;
 }
 
 function LocalEvidenceCard({ item, onDeleted }: { item: EvidenceOutboxRecord; onDeleted: () => void }) {
   const player = useAudioPlayer(item.type === 'audio' ? item.uri : null);
+  const [videoOpen, setVideoOpen] = useState(false);
   const status = item.uploadStatus === 'uploaded' ? 'Uploaded privately' : item.uploadStatus === 'failed' ? 'Upload failed · manual retry available' : item.journeyId ? `Upload queued · ${item.uploadAttempts} attempts` : 'Saved locally · no signed-in journey';
   return <View style={s.card}>
     <Text style={s.reason}>{item.type === 'video' ? 'Video' : 'Audio'} · {new Date(item.recordedAt).toLocaleString()} · {item.durationSeconds}s</Text>
     <Text style={s.meta}>{status}</Text>
     {item.type === 'audio' ? <TouchableOpacity style={s.refresh} onPress={() => player.play()} accessibilityRole="button"><Text style={s.refreshText}>Play local recording</Text></TouchableOpacity> : null}
+    {item.type === 'video' ? <>
+      <TouchableOpacity style={s.refresh} onPress={() => setVideoOpen((open) => !open)} accessibilityRole="button" accessibilityState={{ expanded: videoOpen }}>
+        <Text style={s.refreshText}>{videoOpen ? 'Hide local video' : 'Play local video'}</Text>
+      </TouchableOpacity>
+      {videoOpen ? <LocalVideoPlayer uri={item.uri} /> : null}
+    </> : null}
     <TouchableOpacity style={s.refresh} onPress={() => Alert.alert('Delete local evidence?', 'This permanently removes the device copy. Any uploaded private copy must be deleted separately from the event record.', [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Delete local copy', style: 'destructive', onPress: () => { void deleteLocalEmergencyEvidence(item.evidenceId).then(onDeleted).catch((error) => Alert.alert('Delete failed', error instanceof Error ? error.message : 'Could not delete the local file.')); } },
     ])}><Text style={s.deleteText}>Delete local copy</Text></TouchableOpacity>
   </View>;
+}
+
+function LocalVideoPlayer({ uri }: { uri: string }) {
+  const player = useVideoPlayer(uri, (videoPlayer) => { videoPlayer.play(); });
+  return <VideoView player={player} nativeControls contentFit="contain" style={s.localVideo} />;
 }
 
 function RemoteEvidence({ journeyId, eventId, evidence, onDeleted }: {
@@ -204,6 +217,7 @@ const s = StyleSheet.create({
   refresh: { alignSelf: 'flex-start', paddingHorizontal: 13, paddingVertical: 10, borderColor: C.line, borderWidth: 1, borderRadius: 10, marginTop: 15 }, refreshText: { color: C.teal, fontWeight: '700', fontSize: 11 },
   state: { minHeight: 180, justifyContent: 'center', alignItems: 'center', padding: 20 }, stateText: { color: C.muted, fontSize: 12, textAlign: 'center', lineHeight: 18, marginTop: 10 }, error: { color: C.red, textAlign: 'center', fontSize: 12, lineHeight: 18 },
   evidenceSection: { marginTop: 20 }, evidenceHeading: { color: C.ink, fontSize: 15, fontWeight: '700', marginBottom: 8 },
+  localVideo: { width: '100%', height: 230, marginTop: 12, borderRadius: 10, backgroundColor: '#000000' },
   evidenceRow: { marginTop: 8 }, evidenceActions: { flexDirection: 'row', gap: 8 }, deleteText: { color: C.red, fontWeight: '700', fontSize: 11 },
   summaryCard: { backgroundColor: '#F5F7FA', borderColor: '#CBD3DD', borderWidth: 1, borderRadius: 8, padding: 15, marginTop: 16 }, summaryLabel: { color: C.muted, fontSize: 10, lineHeight: 15, fontWeight: '700' }, summaryCount: { color: '#142B49', fontSize: 20, lineHeight: 28, fontWeight: '700', marginTop: 4 }, sectionHeading: { color: C.muted, fontSize: 11, lineHeight: 16, fontWeight: '700', marginTop: 19 },
   journeyCard: { backgroundColor: '#FFFFFF', borderRadius: 8, borderWidth: 1, borderColor: '#CBD3DD', padding: 15, marginTop: 11 }, journeyTop: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }, journeyTitle: { color: '#142B49', fontSize: 14, lineHeight: 20, fontWeight: '700', marginTop: 8 }, completedBadge: { backgroundColor: '#EDF7F1', borderColor: '#B7D8C5', borderWidth: 1, borderRadius: 5, paddingVertical: 4, paddingHorizontal: 7, minWidth: 87, alignItems: 'center' }, completedText: { color: '#16734B', fontSize: 9, lineHeight: 13, fontWeight: '700' }, eventCard: { backgroundColor: '#F5F7FA', borderRadius: 8, borderWidth: 1, borderColor: C.line, padding: 12, marginTop: 12 }, card: { backgroundColor: C.panel, borderRadius: 14, borderWidth: 1, borderColor: C.line, padding: 15, marginTop: 12 }, cardTop: { gap: 5 }, cardTitle: { color: C.red, fontSize: 13, fontWeight: '800' }, date: { color: C.muted, fontSize: 10, lineHeight: 16 }, reason: { color: C.ink, fontSize: 12, lineHeight: 17, marginTop: 10 }, meta: { color: C.muted, fontSize: 10, lineHeight: 16, marginTop: 6 }, divider: { height: 1, backgroundColor: C.line, marginTop: 12 },

@@ -57,7 +57,7 @@ function describeAudioEvaluationStatus(status: MonitorStatus) {
   const latest = status.audioEvaluationLastTimestampMs
     ? new Date(status.audioEvaluationLastTimestampMs).toLocaleString()
     : 'none';
-  const microphone = status.audioMonitoring ? 'background microphone active' : 'background microphone paused';
+  const microphone = status.audioMonitoring ? 'shared microphone active' : 'shared microphone paused';
   const limit = status.audioEvaluationLimitReached ? '; storage cap reached—export and clear predictions to resume' : '';
   return `Logger ${status.audioEvaluationLogging ? 'ON' : 'OFF'} · ${status.audioEvaluationRowsWritten ?? 0} rows · latest ${latest} · ${microphone}${limit}`;
 }
@@ -169,6 +169,8 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
   const [nativeMonitorStatus, setNativeMonitorStatus] = useState('');
   const [audioEvaluationLogging, setAudioEvaluationLogging] = useState(false);
   const [audioEvaluationStatus, setAudioEvaluationStatus] = useState('Prediction logging is off');
+  const [offlinePhraseModelReady, setOfflinePhraseModelReady] = useState(false);
+  const [offlinePhraseModelBusy, setOfflinePhraseModelBusy] = useState(false);
   const [speechRetryToken, setSpeechRetryToken] = useState(0);
   const [destination, setDestination] = useState('');
   const [travelMode, setTravelMode] = useState<'Walking' | 'Driving' | 'Public transport'>('Walking');
@@ -537,6 +539,17 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
     }
     if (Platform.OS === 'web') {
       setVoiceStatus('Voice monitoring requires the installed iOS or Android app; this Safari preview only shows the interface');
+    } else if (Platform.OS === 'android' && (phraseMonitoringAllowed || backgroundAudioAllowed)) {
+      try {
+        const permission = await requestRecordingPermissionsAsync();
+        if (!permission.granted) {
+          Alert.alert('Microphone permission needed', 'Allow microphone access for the shared on-device SOS phrase and distress-sound monitor.');
+          return;
+        }
+      } catch {
+        Alert.alert('Microphone unavailable', 'Companion could not verify microphone permission. Open Profile → Permissions and grant microphone access.');
+        return;
+      }
     } else if (phraseMonitoringAllowed) {
       try {
         // Load the native-only module only on device so Expo Web can render the shared screens.
@@ -683,13 +696,9 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
   }, []);
 
   const requestEmergency = useCallback(async (reason: string) => {
-    const linkedJourneyId = await AsyncStorage.getItem(ACTIVE_JOURNEY_KEY);
     setEmergencyMode(true);
     setEmergencyNotificationStatus('Requesting contact notification…');
     void escalateBackgroundLocation();
-    if (Platform.OS === 'android' && CompanionMonitor && linkedJourneyId) {
-      void CompanionMonitor.triggerEmergency(reason).catch(() => undefined);
-    }
     const result = await sendEmergencyStatus(reason);
     const deliveryStatus = result?.notifications?.status ?? result?.status ?? 'unknown';
     setEmergencyNotificationStatus(deliveryStatus === 'accepted'
@@ -741,12 +750,20 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
     const subscription = AppState.addEventListener('change', (state) => {
       const foreground = state === 'active';
       setAppForeground(foreground);
-      if (Platform.OS === 'android' && active && CompanionMonitor) {
-        void CompanionMonitor.setBackgroundAudioEnabled(!foreground && backgroundAudioAllowed && !emergencyMode).catch(() => undefined);
-      }
     });
     return () => subscription.remove();
-  }, [active, backgroundAudioAllowed, emergencyMode]);
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !CompanionMonitor) return;
+    const monitor = CompanionMonitor;
+    const refresh = () => void monitor.getStatus()
+      .then((status) => setOfflinePhraseModelReady(!!status.phraseModelReady))
+      .catch(() => undefined);
+    refresh();
+    const subscription = AppState.addEventListener('change', (state) => { if (state === 'active') refresh(); });
+    return () => subscription.remove();
+  }, []);
 
   const refreshAudioEvaluationStatus = useCallback(async () => {
     if (!CompanionMonitor) return;
@@ -802,11 +819,62 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
 
   useEffect(() => {
     if (!active || !journeyId || Platform.OS !== 'android' || !CompanionMonitor) return;
+    const monitor = CompanionMonitor;
     let cancelled = false;
-    const signalSubscription = CompanionMonitor.addListener('onDistressSignal', (signal) => {
-      reportSafetySignal(signal);
+    const refreshMonitorStatus = async () => {
+      try {
+        const status = await monitor.getStatus();
+        if (cancelled) return;
+        if (!status.running) {
+          setNativeMonitorStatus(status.status || 'Android monitor is not running.');
+          return;
+        }
+        if (status.emergencyActive) {
+          setEmergencyMode(true);
+          setPendingCheckIn(null);
+          setEmergencyNotificationStatus(status.status || 'Emergency protocol is active; check email outcome in History.');
+        }
+        if (status.checkInPending && Number.isFinite(status.checkInDeadlineAt) && (status.checkInDeadlineAt ?? 0) > Date.now()) {
+          setPendingCheckIn({
+            reason: status.checkInReason || 'A possible distress signal was detected.',
+            deadline: status.checkInDeadlineAt!,
+          });
+        }
+        const audioRequested = status.audioCaptureEnabled
+          ?? (backgroundAudioAllowed || (phraseMonitoringAllowed && offlinePhraseModelReady && triggerPhrases.some((phrase) => phrase.enabled)));
+        const phraseNeedsModel = phraseMonitoringAllowed && !status.phraseModelReady && triggerPhrases.some((phrase) => phrase.enabled);
+        const checks = [
+          status.phraseRecognitionActive ? 'personal SOS phrases' : null,
+          status.soundClassificationActive ? 'distress sounds' : null,
+          status.motionMonitoring ? 'motion' : null,
+        ].filter(Boolean).join(', ');
+        if (audioRequested && !status.audioMonitoring) {
+          setNativeMonitorStatus('Android microphone monitoring is starting or reconnecting; check the foreground notification if it stays paused.');
+        } else if (audioRequested && status.audioMonitoring) {
+          const detectorNotReady = (status.phraseRecognitionEnabled && !status.phraseRecognitionActive)
+            || (status.soundClassificationEnabled && !status.soundClassificationActive);
+          setNativeMonitorStatus(`Android shared microphone is active${checks ? ` for ${checks}` : ''}${detectorNotReady ? `; a voice detector needs attention${status.status ? ` (${status.status})` : ''}` : '.'}`);
+        } else {
+          setNativeMonitorStatus(phraseNeedsModel
+            ? 'Offline SOS phrase model is not downloaded yet; microphone checks are paused. Download it in Profile → Safety preferences → Monitoring.'
+            : status.motionMonitoring
+              ? 'Android motion checks are on; microphone-based checks are disabled in monitoring settings.'
+              : 'Android location monitoring is running; sound and motion checks are disabled.');
+        }
+      } catch {
+        if (!cancelled) setNativeMonitorStatus('Android monitor status could not be verified.');
+      }
+    };
+    const statusInterval = setInterval(() => { void refreshMonitorStatus(); }, 3_000);
+    const signalSubscription = monitor.addListener('onDistressSignal', (signal) => {
+      if (signal.nativeDecisionHandled) {
+        const label = signal.kind === 'private_phrase' ? 'Saved SOS phrase recognized' : `Native ${signal.kind.replaceAll('_', ' ')} signal detected`;
+        setVoiceStatus(`${label} (${Math.round(signal.confidence * 100)}% model score); native safety protocol is handling the event.`);
+      } else {
+        reportSafetySignal(signal);
+      }
     });
-    const safeSubscription = CompanionMonitor.addListener('onCheckInResolved', () => {
+    const safeSubscription = monitor.addListener('onCheckInResolved', () => {
       safetyAgentRef.current?.cancelPendingAlert();
       setPendingCheckIn(null);
     });
@@ -815,54 +883,42 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
       try {
         const { data: { session } } = supabase ? await supabase.auth.getSession() : { data: { session: null } };
         if (cancelled) return;
-        await CompanionMonitor.startMonitoring({
+        await monitor.startMonitoring({
           journeyId,
           supabaseUrl: supabaseConfig.url,
           publishableKey: supabaseConfig.publishableKey,
           accessToken: session?.access_token ?? '',
           refreshToken: session?.refresh_token ?? '',
           motionEnabled: motionMonitoringAllowed,
-          audioEnabled: AppState.currentState !== 'active' && backgroundAudioAllowed,
+          audioEnabled: (backgroundAudioAllowed || (phraseMonitoringAllowed && offlinePhraseModelReady && triggerPhrases.some((phrase) => phrase.enabled))) && !emergencyMode,
+          soundEnabled: backgroundAudioAllowed && !emergencyMode,
+          phraseRecognitionEnabled: phraseMonitoringAllowed && offlinePhraseModelReady && !emergencyMode,
+          triggerPhrasesJson: JSON.stringify(triggerPhrases),
         });
       } catch (error) {
         startupError = error;
       }
       if (cancelled) return;
-      try {
-        if (AppState.currentState === 'active' || !backgroundAudioAllowed) await CompanionMonitor.setBackgroundAudioEnabled(false);
-      } catch (error) {
-        startupError ??= error;
-      }
-      try {
-        const status = await CompanionMonitor.getStatus();
-        if (cancelled) return;
-        if (status.running) {
-          const audioEnabled = status.audioMonitoring ?? (AppState.currentState !== 'active' && backgroundAudioAllowed);
-          const motionEnabled = status.motionMonitoring ?? motionMonitoringAllowed;
-          setNativeMonitorStatus(audioEnabled && motionEnabled
-            ? 'Android background sound and motion monitoring are running.'
-            : audioEnabled
-              ? 'Android background sound monitoring is running; motion checks are disabled.'
-              : motionEnabled
-                ? 'Android motion checks are running. Background sound monitoring pauses while Companion is open.'
-                : 'Android monitoring service is running; sound and motion checks are disabled.');
-        } else {
-          setNativeMonitorStatus(startupError
-            ? `Android monitor is not running: ${startupError instanceof Error ? startupError.message : 'start failed'}`
-            : status.status || 'Android monitor is not running.');
-        }
-      } catch (error) {
-        if (!cancelled) setNativeMonitorStatus(startupError || error
-          ? `Android monitor status could not be verified: ${startupError instanceof Error ? startupError.message : error instanceof Error ? error.message : 'unknown error'}`
-          : 'Android monitor status could not be verified.');
-      }
+      await refreshMonitorStatus();
+      if (startupError && !cancelled) setNativeMonitorStatus(`Android monitor start warning: ${startupError instanceof Error ? startupError.message : 'start failed'}`);
     })();
     return () => {
       cancelled = true;
+      clearInterval(statusInterval);
       signalSubscription.remove();
       safeSubscription.remove();
     };
-  }, [active, journeyId, backgroundAudioAllowed, motionMonitoringAllowed]);
+  }, [active, journeyId, backgroundAudioAllowed, phraseMonitoringAllowed, triggerPhrases, emergencyMode, motionMonitoringAllowed]);
+
+  useEffect(() => {
+    if (!active || Platform.OS !== 'android' || !CompanionMonitor) return;
+    const monitor = CompanionMonitor;
+    const enabledPhrases = phraseMonitoringAllowed && offlinePhraseModelReady && !emergencyMode && triggerPhrases.some((phrase) => phrase.enabled);
+    const captureEnabled = !emergencyMode && (backgroundAudioAllowed || enabledPhrases);
+    void monitor.setAudioMonitoringEnabled(captureEnabled, backgroundAudioAllowed && !emergencyMode)
+      .then(() => monitor.setTriggerPhrases(JSON.stringify(triggerPhrases), enabledPhrases))
+      .catch(() => setNativeMonitorStatus('Android audio-monitor settings could not be applied.'));
+  }, [active, backgroundAudioAllowed, phraseMonitoringAllowed, offlinePhraseModelReady, triggerPhrases, emergencyMode]);
 
   const onTriggerPhrase = useCallback((phrase: TriggerPhrase, confidence: number | null) => {
     setVoiceStatus(confidence !== null && confidence < 0.65
@@ -966,7 +1022,7 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="dark" />
-      <SpeechMonitor active={active && phraseMonitoringAllowed && !emergencyMode && (Platform.OS !== 'android' || appForeground)} phrases={triggerPhrases} retryToken={speechRetryToken} onStatus={setVoiceStatus} onPhrase={onTriggerPhrase} />
+      <SpeechMonitor active={active && phraseMonitoringAllowed && !emergencyMode && Platform.OS !== 'android' && appForeground} phrases={triggerPhrases} retryToken={speechRetryToken} onStatus={setVoiceStatus} onPhrase={onTriggerPhrase} />
       <EmergencyAudioCapture eventId={emergencyEventId} consent={evidenceConsent} onStatus={setEvidenceStatus} />
       <EmergencyVideoCapture eventId={emergencyEventId} journeyId={journeyId} consent={evidenceConsent} onStatus={setEvidenceStatus} />
       <KeyboardAvoidingView style={styles.safe} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -1086,23 +1142,39 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
             <NotificationPreferences />
             <View style={styles.inputCard}>
               <Text style={styles.cardLabel}>MONITORING</Text>
-              <Text style={styles.helper}>Saved phrases are checked by the device speech-recognition service while a journey is active and the app is open. Android also has a background YAMNet classifier for shouting, screaming, crying, whimpering and wailing, plus a fall heuristic, when a signed-in Supabase journey and required permissions are active. Its thresholds are unvalidated. An independent SOS phrase can trigger an emergency alert automatically; lower-confidence sound and motion signals may ask you to check in. This prototype cannot contact emergency services.</Text>
+              <Text style={styles.helper}>Android uses one private microphone stream for on-device phrase recognition and YAMNet distress-sound checks, in the foreground and background, while a journey is active and you have enabled the related features. Audio stays in memory and is not saved. The English phrase model must be downloaded once. Model thresholds and phrase accuracy remain unvalidated; this prototype cannot contact emergency services.</Text>
               <View style={styles.statusRow}>
-                <Text style={[styles.helper, { flex: 1, marginTop: 0 }]}>Recognize saved phrases while Companion is open during an active journey.</Text>
+                <Text style={[styles.helper, { flex: 1, marginTop: 0 }]}>Recognize enabled personal SOS phrases during an active journey on Android and while Companion is open on iOS.</Text>
                 <Switch value={phraseMonitoringAllowed} onValueChange={(value) => {
                   setPhraseMonitoringAllowed(value);
                   void AsyncStorage.setItem('companion-phrase-monitor-enabled', String(value));
                   setVoiceStatus(value ? 'Personal phrase recognition enabled' : 'Personal phrase recognition disabled');
                 }} accessibilityLabel="Allow personal SOS phrase monitoring" />
               </View>
+              {Platform.OS === 'android' && <>
+                <Text style={styles.helper}>{offlinePhraseModelReady ? 'Offline English phrase model is installed on this device.' : 'Personal phrase matching needs a one-time ~40 MB English model download. It then runs offline and uses about 300 MB of memory while loaded.'}</Text>
+                {!offlinePhraseModelReady && <TouchableOpacity style={styles.secondaryButton} disabled={offlinePhraseModelBusy} onPress={() => void (async () => {
+                  if (!CompanionMonitor) return;
+                  setOfflinePhraseModelBusy(true);
+                  setVoiceStatus('Downloading the offline English phrase model (about 40 MB)…');
+                  try {
+                    await CompanionMonitor.prepareOfflinePhraseModel();
+                    setOfflinePhraseModelReady(true);
+                    setVoiceStatus('Offline phrase model installed. Personal SOS phrases and distress sounds use one shared microphone stream during active journeys.');
+                    Alert.alert('Offline phrase model ready', 'The model is saved privately on this device. Phrase recognition runs locally during active journeys.');
+                  } catch (error) {
+                    setVoiceStatus(`Offline phrase model download failed: ${error instanceof Error ? error.message : 'check your connection and storage'}`);
+                    Alert.alert('Model download failed', error instanceof Error ? error.message : 'Check your connection and available storage, then try again.');
+                  } finally { setOfflinePhraseModelBusy(false); }
+                })()}><Text style={styles.secondaryText}>{offlinePhraseModelBusy ? 'Downloading offline model…' : 'Download offline phrase model · ~40 MB'}</Text></TouchableOpacity>}
+              </>}
               <View style={styles.statusRow}>
-                <Text style={[styles.helper, { flex: 1, marginTop: 0 }]}>Allow Android to use the microphone for on-device distress-sound checks while this app is backgrounded during an active journey.</Text>
+                <Text style={[styles.helper, { flex: 1, marginTop: 0 }]}>Enable on-device YAMNet checks for screams, shouts, cries, whimpers, and wails during an active journey, both while the app is open and in the background.</Text>
                 <Switch value={backgroundAudioAllowed} onValueChange={(value) => {
                   setBackgroundAudioAllowed(value);
                   void AsyncStorage.setItem('companion-background-audio-enabled', String(value));
-                  if (Platform.OS === 'android' && active && CompanionMonitor) void CompanionMonitor.setBackgroundAudioEnabled(!appForeground && value).catch(() => undefined);
-                  setVoiceStatus(value ? 'Background microphone monitoring allowed for active journeys' : 'Background microphone monitoring disabled by you');
-                }} accessibilityLabel="Allow background microphone distress monitoring" />
+                  setVoiceStatus(value ? 'Distress-sound monitoring enabled for active journeys' : 'Distress-sound monitoring disabled by you');
+                }} accessibilityLabel="Allow on-device distress sound monitoring" />
               </View>
               <View style={styles.statusRow}>
                 <Text style={[styles.helper, { flex: 1, marginTop: 0 }]}>Detect possible falls from motion during this journey.</Text>
@@ -1124,7 +1196,7 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
                 setRouteDeviationThreshold(meters);
                 void AsyncStorage.setItem(ROUTE_DEVIATION_THRESHOLD_KEY, String(meters));
               }} accessibilityRole="radio" accessibilityState={{ selected: routeDeviationThreshold === meters }}><Text style={[styles.thresholdOptionText, routeDeviationThreshold === meters && styles.thresholdOptionTextSelected]}>{meters} m</Text></TouchableOpacity>)}</View>
-              <Text style={styles.helper}>Personal phrases are recognized only while Companion is foregrounded. Background service detects sounds and motion separately. Turning off a monitor keeps location tracking enabled.</Text>
+              <Text style={styles.helper}>Android now feeds phrase matching and sound classification from one microphone capture, avoiding two competing microphone sessions. If the offline phrase model is not installed, personal phrases remain unavailable; YAMNet sound checks can still run. Turning off a monitor keeps location tracking enabled.</Text>
             </View>
             <View style={styles.inputCard}>
               <Text style={styles.cardLabel}>AUDIO MODEL EVALUATION</Text>

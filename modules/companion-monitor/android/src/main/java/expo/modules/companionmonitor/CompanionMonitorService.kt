@@ -23,6 +23,9 @@ import android.content.pm.PackageManager
 import androidx.core.app.NotificationCompat
 import org.tensorflow.lite.Interpreter
 import org.json.JSONObject
+import org.json.JSONArray
+import org.vosk.Model
+import org.vosk.Recognizer
 import java.net.HttpURLConnection
 import java.net.URL
 import java.io.File
@@ -30,7 +33,9 @@ import java.util.Locale
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.math.max
 
 /** Android foreground monitor. Audio is processed on device and never stored by this service. */
@@ -38,6 +43,8 @@ class CompanionMonitorService : Service(), SensorEventListener {
   private val handler = Handler(Looper.getMainLooper())
   private val io = Executors.newSingleThreadExecutor()
   private val audioThread = Executors.newSingleThreadExecutor()
+  private val phraseThread = Executors.newSingleThreadExecutor()
+  private val phraseAudioQueue = ArrayBlockingQueue<ByteArray>(8)
   private var audioRecord: AudioRecord? = null
   private var interpreter: Interpreter? = null
   private var sensorManager: SensorManager? = null
@@ -54,6 +61,12 @@ class CompanionMonitorService : Service(), SensorEventListener {
   private val emergencyRetryDelays = longArrayOf(2_000, 5_000, 15_000, 30_000, 60_000, 120_000)
   @Volatile private var monitoring = false
   @Volatile private var audioMonitoring = false
+  @Volatile private var audioStarting = false
+  @Volatile private var soundClassificationEnabled = false
+  @Volatile private var soundClassifierAvailable = false
+  @Volatile private var phraseRecognitionEnabled = false
+  @Volatile private var phraseMonitorRunning = false
+  @Volatile private var triggerPhrasesJson = "[]"
   @Volatile private var motionMonitoring = true
   @Volatile private var emergencySent = false
   private var journeyId = ""
@@ -89,12 +102,34 @@ class CompanionMonitorService : Service(), SensorEventListener {
       ACTION_CONFIRM_SAFE -> { confirmSafe(); return START_STICKY }
       ACTION_SET_AUDIO -> {
         val enabled = intent.getBooleanExtra(EXTRA_AUDIO_ENABLED, false)
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("backgroundAudioEnabled", enabled).apply()
-        if (enabled && monitoring && !audioMonitoring) { audioRetryAttempts = 0; startAudioMonitor() }
-        else {
-          if (!enabled) stopAudioCapture()
-          if (monitoring) startForeground(NOTIFICATION_ID, monitoringNotification())
+        soundClassificationEnabled = intent.getBooleanExtra(EXTRA_SOUND_ENABLED, enabled)
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+          .putBoolean("audioCaptureEnabled", enabled)
+          .putBoolean("backgroundAudioEnabled", soundClassificationEnabled)
+          .apply()
+        if (enabled && monitoring && !audioMonitoring && !audioStarting) { audioRetryAttempts = 0; startAudioMonitor() }
+        else if (!enabled) stopAudioCapture()
+        if (monitoring) startForeground(NOTIFICATION_ID, monitoringNotification())
+        return START_STICKY
+      }
+      ACTION_SET_PHRASES -> {
+        triggerPhrasesJson = intent.getStringExtra(EXTRA_TRIGGER_PHRASES).orEmpty().ifBlank { "[]" }
+        phraseRecognitionEnabled = intent.getBooleanExtra(EXTRA_PHRASE_RECOGNITION_ENABLED, true)
+        val phraseConfigured = phraseRecognitionEnabled && OfflinePhraseModel.parsePhrases(triggerPhrasesJson).isNotEmpty()
+        val captureEnabled = soundClassificationEnabled || (phraseConfigured && OfflinePhraseModel.isInstalled(this))
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+          .putString("triggerPhrasesJson", SecretBox.encrypt(this, triggerPhrasesJson))
+          .putBoolean("phraseRecognitionEnabled", phraseRecognitionEnabled)
+          .putBoolean("audioCaptureEnabled", captureEnabled)
+          .apply()
+        phraseAudioQueue.clear()
+        if (monitoring && captureEnabled) {
+          if (!audioMonitoring && !audioStarting && hasMicrophonePermission()) startAudioMonitor()
+          else if (audioMonitoring) startPhraseWorker()
+        } else if (!captureEnabled && audioMonitoring) {
+          stopAudioCapture()
         }
+        if (monitoring) startForeground(NOTIFICATION_ID, monitoringNotification())
         return START_STICKY
       }
       ACTION_SET_MOTION -> {
@@ -115,8 +150,15 @@ class CompanionMonitorService : Service(), SensorEventListener {
         intent.getStringExtra(EXTRA_ACCESS_TOKEN)?.takeIf { it.isNotBlank() }?.let { editor.putString("accessToken", SecretBox.encrypt(this, it)) }
         intent.getStringExtra(EXTRA_REFRESH_TOKEN)?.takeIf { it.isNotBlank() }?.let { editor.putString("refreshToken", SecretBox.encrypt(this, it)) }
         val audioEnabled = intent.getBooleanExtra(EXTRA_AUDIO_ENABLED, false)
+          soundClassificationEnabled = intent.getBooleanExtra(EXTRA_SOUND_ENABLED, audioEnabled)
+        phraseRecognitionEnabled = intent.getBooleanExtra(EXTRA_PHRASE_RECOGNITION_ENABLED, false)
+        triggerPhrasesJson = intent.getStringExtra(EXTRA_TRIGGER_PHRASES).orEmpty().ifBlank { "[]" }
         motionMonitoring = intent.getBooleanExtra(EXTRA_MOTION_ENABLED, prefs.getBoolean("motionMonitoringEnabled", true))
-        editor.putBoolean("running", true).putBoolean("backgroundAudioEnabled", audioEnabled)
+        editor.putBoolean("running", true)
+          .putBoolean("audioCaptureEnabled", audioEnabled)
+          .putBoolean("backgroundAudioEnabled", soundClassificationEnabled)
+          .putBoolean("phraseRecognitionEnabled", phraseRecognitionEnabled)
+          .putString("triggerPhrasesJson", SecretBox.encrypt(this, triggerPhrasesJson))
           .putBoolean("motionMonitoringEnabled", motionMonitoring).apply()
         screamThreshold = intent.getFloatExtra(EXTRA_SCREAM_THRESHOLD, 0.82f).coerceIn(0.5f, 0.99f)
         if (prefs.getBoolean("emergencyActive", false)) {
@@ -162,12 +204,15 @@ class CompanionMonitorService : Service(), SensorEventListener {
         if (prefs.getBoolean("running", false) && journeyId.isNotBlank()) {
           monitoring = true
           motionMonitoring = prefs.getBoolean("motionMonitoringEnabled", true)
+          soundClassificationEnabled = prefs.getBoolean("backgroundAudioEnabled", false)
+          phraseRecognitionEnabled = prefs.getBoolean("phraseRecognitionEnabled", false)
+          triggerPhrasesJson = SecretBox.decrypt(this, prefs.getString("triggerPhrasesJson", null)).orEmpty().ifBlank { "[]" }
           configureMotionMonitoring(motionMonitoring)
-          if (!audioMonitoring && MonitorRecoveryPolicy.shouldStartBackgroundAudio(
-              prefs.getBoolean("backgroundAudioEnabled", false), hasMicrophonePermission(),
+            if (!audioMonitoring && MonitorRecoveryPolicy.shouldStartBackgroundAudio(
+              prefs.getBoolean("audioCaptureEnabled", prefs.getBoolean("backgroundAudioEnabled", false)), hasMicrophonePermission(),
             )) startAudioMonitor()
           else startForeground(NOTIFICATION_ID, monitoringNotification())
-          if (prefs.getBoolean("backgroundAudioEnabled", false) && !hasMicrophonePermission()) {
+          if (prefs.getBoolean("audioCaptureEnabled", false) && !hasMicrophonePermission()) {
             publishStatus("Background audio is paused because microphone permission is unavailable. Motion monitoring continues.")
           }
           if (prefs.getBoolean("checkInPending", false)) restorePendingCheckIn(prefs)
@@ -183,26 +228,29 @@ class CompanionMonitorService : Service(), SensorEventListener {
     stopMonitoring()
     sensorManager?.unregisterListener(this)
     audioThread.shutdownNow()
+    phraseThread.shutdownNow()
     io.shutdownNow()
     super.onDestroy()
   }
 
   private fun startAudioMonitor() {
-    if (audioMonitoring) return
+    if (audioMonitoring || audioStarting) return
     if (!MonitorRecoveryPolicy.shouldStartBackgroundAudio(
-        getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("backgroundAudioEnabled", false),
+        getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("audioCaptureEnabled", false),
         hasMicrophonePermission(),
       )) {
-      publishStatus("Background audio is off. Enable it and grant microphone permission to use sound monitoring.")
+      publishStatus("On-device voice monitoring is paused. Enable a microphone-based safety feature and grant microphone permission.")
       return
     }
-    audioMonitoring = true
-    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("running", true).putBoolean("audioMonitoringActive", true).apply()
+    audioStarting = true
+    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("running", true)
+      .putBoolean("audioMonitoringActive", false)
+      .putBoolean("soundClassifierActive", false)
+      .putBoolean("phraseRecognitionActive", false)
+      .apply()
     startForeground(NOTIFICATION_ID, monitoringNotification())
     audioThread.execute {
       try {
-        val model = loadModel()
-        interpreter = Interpreter(model, Interpreter.Options().setNumThreads(2))
         val sampleRate = AudioWindowBuffer.SAMPLE_RATE_HZ
         val windowSize = AudioWindowBuffer.YAMNET_WINDOW_SAMPLES
         val windowBuffer = AudioWindowBuffer()
@@ -216,7 +264,17 @@ class CompanionMonitorService : Service(), SensorEventListener {
           .build()
         if (recorder.state != AudioRecord.STATE_INITIALIZED) throw IllegalStateException("Microphone initialization failed.")
         audioRecord = recorder
+        if (!monitoring || !getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("audioCaptureEnabled", false) || !hasMicrophonePermission()) {
+          recorder.release()
+          audioRecord = null
+          return@execute
+        }
         recorder.startRecording()
+        audioMonitoring = true
+        audioStarting = false
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("audioMonitoringActive", true).apply()
+        startForeground(NOTIFICATION_ID, monitoringNotification())
+        startPhraseWorker()
         val readBuffer = ShortArray(windowSize)
         while (monitoring && audioMonitoring && !Thread.currentThread().isInterrupted) {
           var readOffset = 0
@@ -224,49 +282,145 @@ class CompanionMonitorService : Service(), SensorEventListener {
           while (readOffset < required && monitoring && audioMonitoring) {
             val count = recorder.read(readBuffer, 0, minOf(readBuffer.size, required - readOffset), AudioRecord.READ_BLOCKING)
             if (count <= 0) throw IllegalStateException("Microphone stream ended.")
+            enqueuePhraseSamples(readBuffer, count)
             windowBuffer.append(readBuffer, count)
             readOffset += count
           }
           if (windowBuffer.isReady() && monitoring && audioMonitoring) {
             // Timestamp the end of captured audio before inference latency is added.
-            inferWindow(windowBuffer.currentWindow(), System.currentTimeMillis())
+            if (soundClassificationEnabled) {
+              try {
+                if (interpreter == null) {
+                  interpreter = Interpreter(loadModel(), Interpreter.Options().setNumThreads(2))
+                  soundClassifierAvailable = true
+                  getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("soundClassifierActive", true).apply()
+                  startForeground(NOTIFICATION_ID, monitoringNotification())
+                }
+                inferWindow(windowBuffer.currentWindow(), System.currentTimeMillis())
+              } catch (error: Exception) {
+                disableSoundClassification("YAMNet could not start: ${error.message ?: "model unavailable"}")
+              }
+            } else if (interpreter != null) {
+              interpreter?.close()
+              interpreter = null
+            }
             windowBuffer.advance()
           }
         }
       } catch (_: SecurityException) {
-        publishStatus("Microphone access was denied. Background voice monitoring is off.")
+        publishStatus("Microphone access was denied. On-device voice monitoring is off.")
       } catch (error: Exception) {
-        publishStatus("Voice model unavailable: ${error.message ?: "initialization failed"}")
-        scheduleAudioRetry()
+        publishStatus("On-device voice monitor unavailable: ${error.message ?: "initialization failed"}")
       } finally {
         audioMonitoring = false
+        audioStarting = false
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("audioMonitoringActive", false).apply()
+        phraseAudioQueue.clear()
         try { audioRecord?.stop() } catch (_: Exception) { }
         audioRecord?.release()
         audioRecord = null
         interpreter?.close()
         interpreter = null
+        soundClassifierAvailable = false
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+          .putBoolean("soundClassifierActive", false)
+          .putBoolean("phraseRecognitionActive", false)
+          .apply()
+        if (monitoring) startForeground(NOTIFICATION_ID, monitoringNotification())
         if (!monitoring) getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("running", false).apply()
+        else if (getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("audioCaptureEnabled", false)
+          && hasMicrophonePermission() && audioRetryAttempts < 3) scheduleAudioRetry()
       }
     }
+  }
+
+  private fun enqueuePhraseSamples(samples: ShortArray, count: Int) {
+    if (!phraseRecognitionEnabled || OfflinePhraseModel.parsePhrases(triggerPhrasesJson).isEmpty()) return
+    val bytes = ByteArray(count * 2)
+    for (index in 0 until count) {
+      val sample = samples[index].toInt()
+      bytes[index * 2] = sample.toByte()
+      bytes[index * 2 + 1] = (sample shr 8).toByte()
+    }
+    if (!phraseAudioQueue.offer(bytes)) {
+      phraseAudioQueue.poll()
+      phraseAudioQueue.offer(bytes)
+    }
+  }
+
+  private fun startPhraseWorker() {
+    if (!phraseRecognitionEnabled || OfflinePhraseModel.parsePhrases(triggerPhrasesJson).isEmpty() || phraseMonitorRunning) return
+    phraseMonitorRunning = true
+    phraseThread.execute {
+      var model: Model? = null
+      var recognizer: Recognizer? = null
+      var currentGrammar = ""
+      val lastMatchAt = mutableMapOf<String, Long>()
+      try {
+        val modelDirectory = OfflinePhraseModel.directory(this)
+        if (!OfflinePhraseModel.isInstalled(this)) {
+          publishStatus("Personal phrase model not downloaded. Open Profile → Safety preferences → Monitoring and download the offline English model.")
+          return@execute
+        }
+        val loadedModel = Model(modelDirectory.absolutePath)
+        model = loadedModel
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("phraseModelReady", true).apply()
+        publishStatus("Shared on-device audio stream active for distress sounds and personal SOS phrases.")
+        while (monitoring && audioMonitoring && !Thread.currentThread().isInterrupted) {
+          val phrases = OfflinePhraseModel.parsePhrases(triggerPhrasesJson)
+          val signature = phrases.joinToString("|") { "${it.id}:${it.phrase}:${it.independentActivation}" }
+          if (!phraseRecognitionEnabled || phrases.isEmpty()) {
+            recognizer?.close()
+            recognizer = null
+            currentGrammar = ""
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("phraseRecognitionActive", false).apply()
+          } else if (signature != currentGrammar) {
+            recognizer?.close()
+            recognizer = OfflinePhraseModel.createRecognizer(loadedModel, phrases)
+            currentGrammar = signature
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("phraseRecognitionActive", recognizer != null).apply()
+          }
+          val audio = phraseAudioQueue.poll(500, TimeUnit.MILLISECONDS) ?: continue
+          val currentRecognizer = recognizer ?: continue
+          if (currentRecognizer.acceptWaveForm(audio, audio.size)) {
+            val matched = OfflinePhraseModel.matchResult(currentRecognizer.result, phrases) ?: continue
+            val (phrase, confidence) = matched
+            val now = System.currentTimeMillis()
+            if (confidence < 0.65f || now - (lastMatchAt[phrase.id] ?: 0L) < 15_000L) continue
+            lastMatchAt[phrase.id] = now
+            emitSignal("private_phrase", confidence, now, "native-phrase-${UUID.randomUUID()}", phrase.id, phrase.independentActivation)
+            onPhraseRecognized(phrase, confidence, now)
+          }
+        }
+      } catch (error: Exception) {
+        if (monitoring && audioMonitoring) publishStatus("Offline phrase recognition failed: ${error.message ?: "model error"}")
+      } finally {
+        recognizer?.close()
+        model?.close()
+        phraseMonitorRunning = false
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("phraseRecognitionActive", false).apply()
+      }
+    }
+  }
+
+  private fun onPhraseRecognized(phrase: SavedSosPhrase, confidence: Float, timestamp: Long) {
+    if (emergencySent) return
+    if (phrase.independentActivation) activateEmergency("Configured personal SOS phrase matched.")
+    else requestCheckIn("Configured personal SOS phrase matched", confidence, timestamp)
   }
 
   private fun inferWindow(samples: ShortArray, windowTimestamp: Long) {
     val inputTensor = interpreter?.getInputTensor(0) ?: return
     val inputElements = inputTensor.shape().fold(1) { acc, value -> acc * value }
     if (inputElements != samples.size) {
-      publishStatus("YAMNet input shape ${inputTensor.shape().contentToString()} does not match the 16 kHz audio window.")
       soundScorer.reset()
-      scheduleAudioRetry()
-      audioMonitoring = false
+      disableSoundClassification("YAMNet input shape ${inputTensor.shape().contentToString()} does not match the 16 kHz audio window.")
       return
     }
     val outputTensor = interpreter?.getOutputTensor(0) ?: return
     val outputSize = outputTensor.shape().fold(1) { acc, value -> acc * value }
     if (outputSize <= DistressSoundScorer.VOCAL_DISTRESS_INDICES.last()) {
-      audioMonitoring = false
-      publishStatus("The distress model output does not contain the required AudioSet labels.")
-      scheduleAudioRetry()
+      disableSoundClassification("The distress model output does not contain the required AudioSet labels.")
       return
     }
     val input = arrayOf(AudioPreprocessor.normalizePcm16(samples))
@@ -291,10 +445,19 @@ class CompanionMonitorService : Service(), SensorEventListener {
       }
     } catch (error: Exception) {
       soundScorer.reset()
-      publishStatus("Distress sound inference failed: ${error.message ?: "model error"}")
-      scheduleAudioRetry()
-      audioMonitoring = false
+      disableSoundClassification("Distress sound inference failed: ${error.message ?: "model error"}")
     }
+  }
+
+  /** A classifier failure must not tear down the shared microphone stream used by phrase ASR. */
+  private fun disableSoundClassification(message: String) {
+    soundClassificationEnabled = false
+    soundClassifierAvailable = false
+    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("soundClassifierActive", false).apply()
+    try { interpreter?.close() } catch (_: Exception) { }
+    interpreter = null
+    publishStatus("$message Personal SOS phrase recognition and motion monitoring can continue.")
+    if (monitoring) startForeground(NOTIFICATION_ID, monitoringNotification())
   }
 
   /** Opt-in prediction metadata only. Raw microphone samples are never written to this log. */
@@ -334,13 +497,14 @@ class CompanionMonitorService : Service(), SensorEventListener {
 
   override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
-  private fun emitSignal(kind: String, confidence: Float, timestamp: Long) {
-    if (timestamp - lastSignalAt < 2_500) return
-    lastSignalAt = timestamp
-    val signalId = "native-${kind}-${UUID.randomUUID()}"
+  private fun emitSignal(kind: String, confidence: Float, timestamp: Long, signalId: String = "native-$kind-${UUID.randomUUID()}", phraseId: String? = null, independentActivation: Boolean? = null) {
+    if (kind != "private_phrase") {
+      if (timestamp - lastSignalAt < 2_500) return
+      lastSignalAt = timestamp
+    }
     val value = JSONObject().put("kind", kind).put("confidence", confidence).put("timestamp", timestamp).put("signalId", signalId).toString()
     getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("lastSignal", value).apply()
-    CompanionMonitorBridge.emit(kind, confidence, timestamp, signalId)
+    CompanionMonitorBridge.emit(kind, confidence, timestamp, signalId, phraseId, independentActivation, true)
   }
 
   private fun onDistress(kind: String, confidence: Float, timestamp: Long) {
@@ -367,7 +531,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
     val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
     if (prefs.getBoolean("checkInPending", false) || emergencySent) return
     val deadline = System.currentTimeMillis() + CHECK_IN_MS
-    prefs.edit().putBoolean("checkInPending", true).putLong("checkInDeadlineAt", deadline).apply()
+    prefs.edit().putBoolean("checkInPending", true).putLong("checkInDeadlineAt", deadline).putString("checkInReason", reason).apply()
     showAlertNotification("Check in now", "$reason. Companion will alert your trusted contacts if you do not confirm you're safe.", safeAction = true)
     schedulePendingCheckIn(deadline)
   }
@@ -399,6 +563,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
     getSharedPreferences(PREFS, MODE_PRIVATE).edit()
       .putBoolean("checkInPending", false)
       .remove("checkInDeadlineAt")
+      .remove("checkInReason")
       .apply()
   }
 
@@ -575,8 +740,15 @@ class CompanionMonitorService : Service(), SensorEventListener {
 
   private fun stopAudioCapture() {
     audioMonitoring = false
+    audioStarting = false
     audioRetryAttempts = 0
-    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("audioMonitoringActive", false).apply()
+    soundClassifierAvailable = false
+    getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+      .putBoolean("audioMonitoringActive", false)
+      .putBoolean("soundClassifierActive", false)
+      .putBoolean("phraseRecognitionActive", false)
+      .apply()
+    phraseAudioQueue.clear()
     try { audioRecord?.stop() } catch (_: Exception) { }
   }
 
@@ -589,7 +761,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
     val delay = delays[audioRetryAttempts++]
     handler.postDelayed({
       val preferences = getSharedPreferences(PREFS, MODE_PRIVATE)
-      if (monitoring && preferences.getBoolean("backgroundAudioEnabled", false) && hasMicrophonePermission() && !audioMonitoring) {
+      if (monitoring && preferences.getBoolean("audioCaptureEnabled", false) && hasMicrophonePermission() && !audioMonitoring) {
         startAudioMonitor()
       }
     }, delay)
@@ -619,18 +791,39 @@ class CompanionMonitorService : Service(), SensorEventListener {
     }
   }
 
-  private fun monitoringNotification(): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+  private fun monitoringNotification(): Notification {
+    val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+    val captureRequested = prefs.getBoolean("audioCaptureEnabled", false)
+    val phraseNeedsModel = phraseRecognitionEnabled
+      && OfflinePhraseModel.parsePhrases(triggerPhrasesJson).isNotEmpty()
+      && !OfflinePhraseModel.isInstalled(this)
+    val audioState = when {
+      audioMonitoring && soundClassifierAvailable && phraseRecognitionAvailable() && motionMonitoring -> "On-device SOS phrase, distress-sound, motion, and location checks are running."
+      audioMonitoring && soundClassifierAvailable && phraseRecognitionAvailable() -> "On-device SOS phrase and distress-sound checks are running."
+      audioMonitoring && soundClassifierAvailable && motionMonitoring -> "On-device distress-sound and motion checks are running."
+      audioMonitoring && soundClassifierAvailable -> "On-device distress-sound checks are running."
+      audioMonitoring && phraseRecognitionAvailable() && motionMonitoring -> "On-device SOS phrase and motion checks are running."
+      audioMonitoring && phraseRecognitionAvailable() -> "On-device SOS phrase checks are running."
+      audioMonitoring && motionMonitoring -> "Microphone is active; motion checks are on; no voice detector is enabled."
+      audioMonitoring -> "Microphone is active; no voice detector is enabled."
+      captureRequested && !hasMicrophonePermission() -> "Microphone permission is unavailable; motion and location checks continue."
+      captureRequested -> "On-device microphone checks are starting or reconnecting."
+      phraseNeedsModel -> "Offline SOS phrase model not downloaded; microphone checks are paused. Download it in Profile settings."
+      motionMonitoring -> "Native motion checks are on; microphone checks are off in your monitoring settings."
+      else -> "Safety location tracking is active; sound and motion checks are off."
+    }
+    return NotificationCompat.Builder(this, CHANNEL_ID)
     .setSmallIcon(android.R.drawable.ic_lock_lock)
     .setContentTitle("Companion safety monitoring active")
-    .setContentText(when {
-      audioMonitoring && motionMonitoring -> "On-device sound and motion checks are running for this journey."
-      audioMonitoring -> "On-device sound checks are running; motion checks are off."
-      motionMonitoring -> "Native motion checks are on; background audio monitoring is off."
-      else -> "Safety location tracking is active; sound and motion checks are off."
-    })
+    .setContentText(audioState)
     .setOngoing(true)
     .setCategory(NotificationCompat.CATEGORY_SERVICE)
     .build()
+  }
+
+  private fun phraseRecognitionAvailable(): Boolean = phraseRecognitionEnabled
+    && OfflinePhraseModel.isInstalled(this)
+    && OfflinePhraseModel.parsePhrases(triggerPhrasesJson).isNotEmpty()
 
   private fun showAlertNotification(title: String, message: String, safeAction: Boolean) {
     val builder = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -665,6 +858,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
     const val ACTION_CONFIRM_SAFE = "expo.modules.companionmonitor.CONFIRM_SAFE"
     const val ACTION_SET_AUDIO = "expo.modules.companionmonitor.SET_AUDIO"
     const val ACTION_SET_MOTION = "expo.modules.companionmonitor.SET_MOTION"
+    const val ACTION_SET_PHRASES = "expo.modules.companionmonitor.SET_PHRASES"
     const val EXTRA_JOURNEY_ID = "journeyId"
     const val EXTRA_SUPABASE_URL = "supabaseUrl"
     const val EXTRA_PUBLISHABLE_KEY = "publishableKey"
@@ -672,6 +866,9 @@ class CompanionMonitorService : Service(), SensorEventListener {
     const val EXTRA_REFRESH_TOKEN = "refreshToken"
     const val EXTRA_SCREAM_THRESHOLD = "screamThreshold"
     const val EXTRA_AUDIO_ENABLED = "audioEnabled"
+    const val EXTRA_SOUND_ENABLED = "soundEnabled"
+    const val EXTRA_PHRASE_RECOGNITION_ENABLED = "phraseRecognitionEnabled"
+    const val EXTRA_TRIGGER_PHRASES = "triggerPhrasesJson"
     const val EXTRA_MOTION_ENABLED = "motionEnabled"
     const val EXTRA_EMERGENCY_REASON = "emergencyReason"
     private const val CHANNEL_ID = "companion-safety-monitor"

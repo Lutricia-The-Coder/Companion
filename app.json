@@ -109,7 +109,8 @@
       "expo-status-bar",
       "expo-asset",
       "expo-sqlite",
-      "expo-web-browser"
+      "expo-web-browser",
+      "expo-video"
     ],
     "web": {
       "favicon": "./assets/favicon.png",

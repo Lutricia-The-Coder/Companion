@@ -8,6 +8,9 @@ This is the implementation ledger for the requirements supplied in this project 
 
 - [~] Fixed the route-less Supabase journey creation path: omit `p_route` when empty so the deployed RPC default applies, and reduce oversized routes to its 1,000-point limit. Journey startup now stops with the returned backend error instead of showing a local-only session as protected. Included in the APK installed on the Samsung on 2026-11-23; cloud journey start still needs retesting.
 - [~] Bound the safety agent and emergency request to the newly created/persisted journey ID, avoiding stale React state when an immediate personal phrase triggers SOS. Included in the 2026-11-23 APK; end-to-end device pass remains.
+- [x] Emergency email delivery passed one live test on 2026-11-23: the app recorded Brevo acceptance, Brevo marked the message delivered to the test contact, and the user confirmed receipt. Email body content, route-deviation email, retry behavior, and additional recipients still need validation.
+- [~] The History source now places local evidence before completed journeys and has an inline local video player using SDK 58 `expo-video`; lint and typecheck pass. A fresh APK is needed to verify video playback on the phone. The current evidence remains queued for upload and still needs a successful private upload/access test.
+- [~] Diagnosed queued video uploads: the Storage RLS policy counted the object filename as a fourth folder. Added `202611230001_fix_evidence_upload_policy.sql`; apply it in Supabase SQL Editor, then retry the existing queued upload. Remote policy is not yet corrected or verified.
 - [~] Added an Edge Function guard so concurrent duplicate SOS requests cannot send while the first request is pending; retries are allowed only after a persisted retryable provider outcome. Local bundle is generated at `tmp/supabase-dashboard-functions/activate-emergency.ts`; manually deploy it in Supabase Dashboard before testing this protection.
 - [x] Replaced the unconditional “Your contacts have been alerted” home headline with “Emergency protocol is active” plus an explicit provider outcome that distinguishes accepted, partial, pending, failed, no-recipient, and unknown states.
 - [x] Built and installed `android/app/build/outputs/apk/release/app-release.apk` (arm64-v8a, 2026-11-23) on the authorized Samsung A24. The app process launched; feature testing remains pending.
@@ -48,10 +51,10 @@ This is the implementation ledger for the requirements supplied in this project 
 
 ## B. Passive distress detection and agent
 
-- [~] Capture Android microphone audio through the native service while background audio monitoring is explicitly enabled.
+- [~] Capture one Android microphone stream for the enabled phrase and/or sound detectors while the active-journey microphone foreground service is permitted; actual activation/readiness is now surfaced from native service state.
 - [~] Preprocess and window incoming audio for on-device inference.
 - [~] Classify scream/shout sounds on-device with YAMNet; evaluate against a consented labeled corpus.
-- [~] Use the best feasible architecture for personalized phrases: foreground on-device OS transcript recognition, with background sound classification separated and limitations disclosed; no reliable arbitrary-phrase background keyword model is validated.
+- [~] Use offline, grammar-constrained Vosk phrase recognition from the same `AudioRecord` stream as YAMNet, after the user explicitly downloads the ~40 MB English model; exact phrase matching honors per-phrase independent activation. Model installation and Samsung phrase recall still need device validation; do not claim reliable arbitrary phrase recognition.
 - [~] Score audio and motion signals and timestamp detected events.
 - [~] Feed phrase, sound, fall, and route signals into the safety decision engine.
 - [~] Log errors and recover processing when the model or audio pipeline fails.
@@ -74,14 +77,14 @@ This is the implementation ledger for the requirements supplied in this project 
 ## D. Emergency communication
 
 - [~] Create one unique emergency event per activation and save its initial journey location/time; source implementation is complete, deployed verification remains.
-- [~] Notify configured contacts through the supported email provider path (SMS/push are intentionally excluded); verify with the configured provider and a disposable contact.
-- [~] Include activation timestamp, latest available backend location, map link, and authenticated live journey dashboard link in emergency emails; deployed output remains unverified.
-- [~] Continue emergency location updates while the location service is allowed to run.
+- [x] Notify configured contacts through the supported email provider path (SMS/push are intentionally excluded); one test contact received an emergency email on 2026-11-23. Other recipients and route-deviation notifications remain unverified.
+- [x] Include activation timestamp, latest available backend location, map link, and authenticated live journey dashboard link in emergency emails; user confirmed these were present in the delivered 2026-11-23 test email.
+- [~] One live emergency-mode device check on 2026-11-23 confirmed that moving the phone updated the dashboard coordinates and timestamp. Screen-off/background continuity, cadence, and lifecycle cases remain unverified.
 - [~] Retry transient provider failures with a stable provider idempotency key and a six-attempt per-recipient cap; do not resend recipients already accepted by the provider. Verify after deploying the schema and functions.
 - [~] Record per-recipient attempts, provider references/responses, and accepted/failed/unknown outcomes. The app does not claim inbox delivery; remote persistence is unverified.
-- [~] Keep delivery behind a provider adapter; Resend is implemented and server-side secret setup is documented. Existing secret values are not inspected by source checks.
-- [~] Keep provider credentials server-side and do not return fake delivery success; remote function configuration still needs validation.
-- [ ] Apply `202611220001_notification_attempt_outcomes.sql`, deploy updated function bundles, build/install the updated APK, then verify emergency/route calls and notification outcomes using disposable accounts and a test-only recipient.
+- [x] Keep delivery behind a provider adapter; Brevo and Resend adapters are implemented. The Brevo API integration was verified with a delivered test email on 2026-11-23.
+- [x] Keep provider credentials server-side and do not return fake delivery success; the app reported provider acceptance, and Brevo independently reported delivery before the user confirmed receipt.
+- [~] The notification-outcomes schema, function deployment, APK, and one emergency email path are verified. Route-deviation delivery, email content (timestamp/location/links), retry outcomes, and duplicate suppression remain to be tested.
 
 ## E. Evidence capture and access
 

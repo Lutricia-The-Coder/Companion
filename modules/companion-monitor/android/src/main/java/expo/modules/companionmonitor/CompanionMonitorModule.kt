@@ -30,6 +30,9 @@ class CompanionMonitorModule : Module() {
         putExtra(CompanionMonitorService.EXTRA_SCREAM_THRESHOLD, (config["screamThreshold"] as? Number)?.toFloat() ?: 0.82f)
         putExtra(CompanionMonitorService.EXTRA_MOTION_ENABLED, config["motionEnabled"] as? Boolean ?: true)
         putExtra(CompanionMonitorService.EXTRA_AUDIO_ENABLED, config["audioEnabled"] as? Boolean ?: false)
+        putExtra(CompanionMonitorService.EXTRA_SOUND_ENABLED, config["soundEnabled"] as? Boolean ?: false)
+        putExtra(CompanionMonitorService.EXTRA_PHRASE_RECOGNITION_ENABLED, config["phraseRecognitionEnabled"] as? Boolean ?: false)
+        putExtra(CompanionMonitorService.EXTRA_TRIGGER_PHRASES, config["triggerPhrasesJson"] as? String ?: "[]")
       }
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
       else context.startService(intent)
@@ -42,12 +45,29 @@ class CompanionMonitorModule : Module() {
       }
     }
 
-    AsyncFunction("setBackgroundAudioEnabled") { enabled: Boolean ->
+    AsyncFunction("setAudioMonitoringEnabled") { enabled: Boolean, soundEnabled: Boolean ->
       appContext.reactContext?.applicationContext?.let { context ->
         context.startService(Intent(context, CompanionMonitorService::class.java)
           .setAction(CompanionMonitorService.ACTION_SET_AUDIO)
-          .putExtra(CompanionMonitorService.EXTRA_AUDIO_ENABLED, enabled))
+          .putExtra(CompanionMonitorService.EXTRA_AUDIO_ENABLED, enabled)
+          .putExtra(CompanionMonitorService.EXTRA_SOUND_ENABLED, soundEnabled))
       }
+    }
+
+    AsyncFunction("setTriggerPhrases") { phrasesJson: String, enabled: Boolean ->
+      appContext.reactContext?.applicationContext?.let { context ->
+        context.startService(Intent(context, CompanionMonitorService::class.java)
+          .setAction(CompanionMonitorService.ACTION_SET_PHRASES)
+          .putExtra(CompanionMonitorService.EXTRA_TRIGGER_PHRASES, phrasesJson)
+          .putExtra(CompanionMonitorService.EXTRA_PHRASE_RECOGNITION_ENABLED, enabled))
+      }
+    }
+
+    AsyncFunction("prepareOfflinePhraseModel") {
+      val context = appContext.reactContext?.applicationContext
+        ?: throw IllegalStateException("Application context is unavailable.")
+      OfflinePhraseModel.install(context)
+      true
     }
 
     AsyncFunction("setMotionMonitoringEnabled") { enabled: Boolean ->
@@ -120,7 +140,17 @@ class CompanionMonitorModule : Module() {
         "lastSignal" to prefs.getString("lastSignal", null),
         "status" to prefs.getString("status", null),
         "emergencyPending" to prefs.getBoolean("emergencyPending", false),
+        "emergencyActive" to prefs.getBoolean("emergencyActive", false),
+        "checkInPending" to prefs.getBoolean("checkInPending", false),
+        "checkInDeadlineAt" to prefs.getLong("checkInDeadlineAt", 0L).toDouble(),
+        "checkInReason" to prefs.getString("checkInReason", null),
         "audioMonitoring" to prefs.getBoolean("audioMonitoringActive", false),
+        "audioCaptureEnabled" to prefs.getBoolean("audioCaptureEnabled", false),
+        "soundClassificationEnabled" to prefs.getBoolean("backgroundAudioEnabled", false),
+        "soundClassificationActive" to prefs.getBoolean("soundClassifierActive", false),
+        "phraseRecognitionEnabled" to (prefs.getBoolean("phraseRecognitionEnabled", false) && OfflinePhraseModel.isInstalled(context)),
+        "phraseRecognitionActive" to prefs.getBoolean("phraseRecognitionActive", false),
+        "phraseModelReady" to OfflinePhraseModel.isInstalled(context),
         "motionMonitoring" to prefs.getBoolean("motionMonitoringEnabled", true),
         "audioEvaluationLogging" to prefs.getBoolean("audioEvaluationLogging", false),
         "audioEvaluationRowsWritten" to evaluationRows,
@@ -136,10 +166,18 @@ class CompanionMonitorModule : Module() {
 internal object CompanionMonitorBridge {
   @Volatile var module: CompanionMonitorModule? = null
 
-  fun emit(kind: String, confidence: Float, timestamp: Long, signalId: String) {
+  fun emit(kind: String, confidence: Float, timestamp: Long, signalId: String, phraseId: String? = null, independentActivation: Boolean? = null, nativeDecisionHandled: Boolean = false) {
+    val payload = mutableMapOf<String, Any>("kind" to kind, "confidence" to confidence.toDouble(), "timestamp" to timestamp.toDouble(), "signalId" to signalId)
+    payload["nativeDecisionHandled"] = nativeDecisionHandled
+    if (phraseId != null) {
+      payload["phraseId"] = phraseId
+      payload["exactPhraseMatch"] = true
+      payload["confidenceAvailable"] = true
+    }
+    if (independentActivation != null) payload["independentActivation"] = independentActivation
     module?.sendEvent(
       "onDistressSignal",
-      mapOf("kind" to kind, "confidence" to confidence.toDouble(), "timestamp" to timestamp.toDouble(), "signalId" to signalId),
+      payload,
     )
   }
 
