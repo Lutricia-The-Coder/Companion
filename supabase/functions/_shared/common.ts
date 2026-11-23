@@ -58,11 +58,13 @@ async function emailIdempotencyKey(eventId: string, kind: string, to: string) {
 }
 
 async function sendEmail(to: string, subject: string, text: string, idempotencyKey: string) {
-  const provider = Deno.env.get('COMPANION_EMAIL_PROVIDER') ?? 'resend';
-  if (provider !== 'resend') throw new EmailDeliveryError(`Unsupported email provider: ${provider}`, false, 'failed');
-  const key = Deno.env.get('RESEND_API_KEY');
-  const from = Deno.env.get('RESEND_FROM_EMAIL');
-  if (!key || !from) throw new EmailDeliveryError('Email provider is not configured (missing RESEND_API_KEY or RESEND_FROM_EMAIL).', false, 'failed');
+  const provider = Deno.env.get('COMPANION_EMAIL_PROVIDER') ?? 'brevo';
+  if (!['resend', 'brevo'].includes(provider)) throw new EmailDeliveryError(`Unsupported email provider: ${provider}`, false, 'failed');
+  const keyName = provider === 'brevo' ? 'BREVO_API_KEY' : 'RESEND_API_KEY';
+  const fromName = provider === 'brevo' ? 'BREVO_FROM_EMAIL' : 'RESEND_FROM_EMAIL';
+  const key = Deno.env.get(keyName);
+  const from = Deno.env.get(fromName);
+  if (!key || !from) throw new EmailDeliveryError(`Email provider is not configured (missing ${keyName} or ${fromName}).`, false, 'failed');
   return sendEmailWithProvider(provider, { apiKey: key, from, to, subject, text, idempotencyKey });
 }
 
@@ -87,7 +89,7 @@ async function recordNotificationAttempts(admin: SupabaseClient, eventId: string
       target_masked: typeof outcome.target === 'string' ? outcome.target : 'registered device',
       status,
       attempt_count: Math.max(1, Math.min(3, Number(outcome.attempts) || 1)),
-      provider: typeof outcome.provider === 'string' ? outcome.provider : (channel === 'push' ? 'expo' : (Deno.env.get('COMPANION_EMAIL_PROVIDER') ?? 'resend')),
+      provider: typeof outcome.provider === 'string' ? outcome.provider : (channel === 'push' ? 'expo' : (Deno.env.get('COMPANION_EMAIL_PROVIDER') ?? 'brevo')),
       provider_reference: providerReference,
       provider_response: {
         ...providerResponse,
@@ -196,14 +198,14 @@ export async function notifyContacts(admin: SupabaseClient, journeyId: string, e
     if (previous?.accepted) return {
       channel: 'email', target: maskedTarget('email', email), accepted: true, status: 'accepted',
       attempts: 0, totalAttempts: previous.attempts, retryable: false, idempotencyKey,
-      providerResponse: { reusedAcceptedOutcome: true }, provider: Deno.env.get('COMPANION_EMAIL_PROVIDER') ?? 'resend',
+      providerResponse: { reusedAcceptedOutcome: true }, provider: Deno.env.get('COMPANION_EMAIL_PROVIDER') ?? 'brevo',
     };
     if (previous && previous.attempts >= 6) return {
       channel: 'email', target: maskedTarget('email', email), accepted: false,
       status: previous.status === 'unknown' ? 'unknown' : 'failed', attempts: 0,
       totalAttempts: previous.attempts, retryable: false, idempotencyKey,
       error: 'The six-attempt notification limit has been reached.',
-      provider: Deno.env.get('COMPANION_EMAIL_PROVIDER') ?? 'resend',
+      provider: Deno.env.get('COMPANION_EMAIL_PROVIDER') ?? 'brevo',
     };
     const retry = await retryEmailDelivery(
       () => sendEmail(email, title, message, idempotencyKey),
@@ -212,7 +214,7 @@ export async function notifyContacts(admin: SupabaseClient, journeyId: string, e
     );
     return {
       channel: 'email', target: maskedTarget('email', email), ...retry, idempotencyKey,
-      provider: Deno.env.get('COMPANION_EMAIL_PROVIDER') ?? 'resend',
+      provider: Deno.env.get('COMPANION_EMAIL_PROVIDER') ?? 'brevo',
     };
   }));
   const pushOutcomes = await pushContactOutcomes(admin, journeyId, journey.owner_id, profile?.trusted_contacts, routeNotificationsEnabled && preferences.push !== false, eventId, category, title, `${profile?.display_name || 'A trusted Companion contact'} needs safety assistance. ${reason}. Time: ${eventTime}. Open the Companion dashboard for the authorized live journey.`, { journeyId, eventId, liveLink, mapLink }, attemptsByKey);
@@ -247,7 +249,7 @@ export async function notifyEvidenceContacts(admin: SupabaseClient, journeyId: s
   const outcomes = await Promise.all(targets.map(async (email) => {
     const idempotencyKey = await emailIdempotencyKey(eventId, `evidence-${mediaType}`, email);
     return { channel: 'email', target: maskedTarget('email', email), idempotencyKey,
-      provider: Deno.env.get('COMPANION_EMAIL_PROVIDER') ?? 'resend',
+      provider: Deno.env.get('COMPANION_EMAIL_PROVIDER') ?? 'brevo',
       ...await retryEmailDelivery(() => sendEmail(email, title, message, idempotencyKey)) };
   }));
   const accepted = outcomes.filter((item) => item.accepted).length;

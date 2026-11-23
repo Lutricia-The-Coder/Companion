@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { emailTargets, retryEmailDelivery, sendResendEmail } from '../supabase/functions/_shared/emailNotifications.ts';
+import { emailTargets, retryEmailDelivery, sendBrevoEmail, sendResendEmail } from '../supabase/functions/_shared/emailNotifications.ts';
 
 test('email notifications select only valid, unique email contacts', () => {
   const targets = emailTargets([
@@ -77,6 +77,41 @@ test('Resend rejection is not reported as accepted delivery', async () => {
     subject: 'Emergency alert', text: 'Test only', idempotencyKey: 'event-123/email/contact-1',
     fetcher: async () => new Response('unauthorized', { status: 401 }),
   }), /HTTP 401/);
+});
+
+test('Brevo request uses its API key, verified sender, recipient, and returns accepted reference', async () => {
+  let request;
+  const result = await sendBrevoEmail({
+    apiKey: 'test-brevo-key',
+    from: 'Companion Alerts <alerts@example.test>',
+    to: 'contact@example.test',
+    subject: 'Emergency alert',
+    text: 'Test only',
+    idempotencyKey: 'event-123/email/contact-1',
+    fetcher: async (url, options) => {
+      request = { url, options };
+      return new Response(JSON.stringify({ messageId: '<brevo-123@example.test>' }), { status: 201 });
+    },
+  });
+  assert.equal(request.url, 'https://api.brevo.com/v3/smtp/email');
+  assert.equal(request.options.headers['api-key'], 'test-brevo-key');
+  assert.deepEqual(JSON.parse(request.options.body), {
+    sender: { name: 'Companion Alerts', email: 'alerts@example.test' },
+    to: [{ email: 'contact@example.test' }],
+    subject: 'Emergency alert',
+    textContent: 'Test only',
+  });
+  assert.deepEqual(result, { status: 'accepted', providerReference: '<brevo-123@example.test>' });
+});
+
+test('Brevo sender validation rejects non-address values before sending', async () => {
+  let calls = 0;
+  await assert.rejects(sendBrevoEmail({
+    apiKey: 'test-brevo-key', from: 'not-a-sender', to: 'contact@example.test',
+    subject: 'Emergency alert', text: 'Test only', idempotencyKey: 'event-123/email/contact-1',
+    fetcher: async () => { calls += 1; return new Response('{}', { status: 201 }); },
+  }), /sender must be an email address/);
+  assert.equal(calls, 0);
 });
 
 test('permanent Resend recipient rejection is recorded after one attempt without retrying', async () => {

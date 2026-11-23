@@ -150,6 +150,7 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
   const [active, setActive] = useState(false);
   const [appForeground, setAppForeground] = useState(AppState.currentState === 'active');
   const [emergencyMode, setEmergencyMode] = useState(false);
+  const [emergencyNotificationStatus, setEmergencyNotificationStatus] = useState('Notification outcome has not been confirmed.');
   const [emergencyEventId, setEmergencyEventId] = useState<string | null>(null);
   const [resolvingEmergency, setResolvingEmergency] = useState(false);
   const [journeyId, setJourneyId] = useState<string | null>(null);
@@ -238,6 +239,7 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
           .order('activated_at', { ascending: false }).limit(1).maybeSingle();
         if (cancelled) return;
         setEmergencyMode(true);
+        setEmergencyNotificationStatus('Check notification history for the latest provider outcome.');
         if (event?.id) {
           setEmergencyEventId(event.id);
           await AsyncStorage.setItem('companion-emergency-event-id', event.id);
@@ -566,28 +568,38 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
       let journeyId: string | null = null;
       const { data: { session } } = supabase ? await supabase.auth.getSession() : { data: { session: null } };
       const signedInUser = session?.user ?? null;
-      if (signedInUser) {
-        try {
-          journeyId = await createJourney(signedInUser.id, destination, plannedRoute);
-          if (journeyId) {
-            await AsyncStorage.setItem(ACTIVE_JOURNEY_KEY, journeyId);
-            setJourneyId(journeyId);
-            try { await rememberJourneyId(signedInUser.id, journeyId); }
-            catch { Alert.alert('Journey history is limited', 'This journey is active and sharing location, but could not be added to your account history.'); }
-            if (shareEachJourney) {
-              const emails = [...new Set(contacts.map((contact) => contact.email?.trim().toLowerCase()).filter((value): value is string => !!value))];
-              const shares = await Promise.allSettled(emails.map((contactEmail) => grantTrustedContactAccess(journeyId!, contactEmail)));
-              const granted = shares.filter((result) => result.status === 'fulfilled').length;
-              if (granted < emails.length || emails.length === 0) {
-                Alert.alert('Journey sharing needs attention', emails.length === 0
-                  ? 'No trusted contacts with email addresses are saved. Your journey is active, but it is not shared with a dashboard contact.'
-                  : `${granted} of ${emails.length} contacts received dashboard access. The others must have a Companion account and be saved as trusted contacts.`);
-              }
-            }
+      if (!signedInUser) {
+        Alert.alert('Sign in required', 'Sign in again before starting a protected journey so Companion can connect monitoring and emergency alerts to your account.');
+        return;
+      }
+      try {
+        journeyId = await createJourney(signedInUser.id, destination, plannedRoute);
+        if (!journeyId) throw new Error('Supabase returned no journey ID.');
+        await AsyncStorage.setItem(ACTIVE_JOURNEY_KEY, journeyId);
+        setJourneyId(journeyId);
+        try { await rememberJourneyId(signedInUser.id, journeyId); }
+        catch { Alert.alert('Journey history is limited', 'This journey is active and sharing location, but could not be added to your account history.'); }
+        if (shareEachJourney) {
+          const emails = [...new Set(contacts.map((contact) => contact.email?.trim().toLowerCase()).filter((value): value is string => !!value))];
+          const shares = await Promise.allSettled(emails.map((contactEmail) => grantTrustedContactAccess(journeyId!, contactEmail)));
+          const granted = shares.filter((result) => result.status === 'fulfilled').length;
+          if (granted < emails.length || emails.length === 0) {
+            Alert.alert('Journey sharing needs attention', emails.length === 0
+              ? 'No trusted contacts with email addresses are saved. Your journey is active, but it is not shared with a dashboard contact.'
+              : `${granted} of ${emails.length} contacts received dashboard access. The others must have a Companion account and be saved as trusted contacts.`);
           }
-        } catch {
-          Alert.alert('Sharing is unavailable', 'The safety session can start on this phone, but account location sharing could not connect.');
         }
+      } catch (error) {
+        const reason = error instanceof Error
+          ? error.message
+          : error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+            ? error.message
+            : 'Unknown account-sharing error';
+        Alert.alert(
+          'Journey could not start',
+          `Companion could not create the account-backed safety journey, so monitoring was not started. ${reason}`,
+        );
+        return;
       }
       let backgroundRunning = false;
       if (backgroundGranted && Platform.OS !== 'web') {
@@ -602,7 +614,7 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
       routeDeviationCountRef.current = 0;
       lastRouteSignalAtRef.current = 0;
       setRouteStatus(plannedRoute.length > 0 ? 'Checking route after GPS fix' : 'No route points saved');
-      createJourneySafetyAgent();
+      createJourneySafetyAgent(journeyId);
       setLocationLabel(journeyId
         ? 'Live location updates are reaching your account'
         : backgroundRunning
@@ -656,6 +668,7 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
       await AsyncStorage.removeItem('companion-emergency-event-id');
       setEmergencyEventId(null);
       setEmergencyMode(false);
+      setEmergencyNotificationStatus('Notification outcome has not been confirmed.');
       void restoreBackgroundLocationTask(false);
       Alert.alert('Emergency resolved', 'The event is marked resolved, your live journey is still active, and monitoring has resumed.');
     } catch (error) {
@@ -670,12 +683,26 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
   }, []);
 
   const requestEmergency = useCallback(async (reason: string) => {
+    const linkedJourneyId = await AsyncStorage.getItem(ACTIVE_JOURNEY_KEY);
     setEmergencyMode(true);
+    setEmergencyNotificationStatus('Requesting contact notification…');
     void escalateBackgroundLocation();
-    if (Platform.OS === 'android' && CompanionMonitor && journeyId) {
+    if (Platform.OS === 'android' && CompanionMonitor && linkedJourneyId) {
       void CompanionMonitor.triggerEmergency(reason).catch(() => undefined);
     }
     const result = await sendEmergencyStatus(reason);
+    const deliveryStatus = result?.notifications?.status ?? result?.status ?? 'unknown';
+    setEmergencyNotificationStatus(deliveryStatus === 'accepted'
+      ? 'Provider accepted at least one alert; inbox delivery is not confirmed.'
+      : deliveryStatus === 'partial'
+        ? `Some alerts were accepted; ${result?.notifications?.failures ?? 0} failed and ${result?.notifications?.unknown ?? 0} have unknown outcomes.`
+        : deliveryStatus === 'no_recipients'
+          ? 'No eligible notification contacts are configured.'
+          : deliveryStatus === 'queued' || deliveryStatus === 'already_active' || deliveryStatus === 'pending'
+            ? 'Emergency is active; contact notification is pending confirmation.'
+            : deliveryStatus === 'failed'
+              ? 'The provider did not accept the notification.'
+              : 'Notification outcome is unknown; check History before retrying.');
     if (result?.eventId) {
       if (result.status === 'accepted' || result.status === 'partial') {
         safetyAgentRef.current?.markAlertsSent();
@@ -684,10 +711,10 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
       setEmergencyEventId(result.eventId);
       await AsyncStorage.setItem('companion-emergency-event-id', result.eventId);
     }
-  }, [escalateBackgroundLocation, journeyId]);
+  }, [escalateBackgroundLocation]);
 
-  const createJourneySafetyAgent = useCallback(() => {
-    const decisionStorageKey = `companion-safety-decisions:${journeyId ?? 'unlinked'}`;
+  const createJourneySafetyAgent = useCallback((activeJourneyId: string) => {
+    const decisionStorageKey = `companion-safety-decisions:${activeJourneyId}`;
     let decisionWriteQueue: Promise<void> = Promise.resolve();
     const agent = new SafetyAgent((action, reason, deadline) => {
       if (action === 'prompt_user') {
@@ -704,11 +731,11 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
     });
     safetyAgentRef.current = agent;
     setActiveSafetyAgent(agent);
-  }, [journeyId, requestEmergency]);
+  }, [requestEmergency]);
 
   useEffect(() => {
-    if (active && !safetyAgentRef.current) createJourneySafetyAgent();
-  }, [active, createJourneySafetyAgent]);
+    if (active && journeyId && !safetyAgentRef.current) createJourneySafetyAgent(journeyId);
+  }, [active, createJourneySafetyAgent, journeyId]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
@@ -968,8 +995,8 @@ export default function App({ screen = 'home' }: { screen?: 'home' | 'journey' |
             <Text style={styles.subtitle}>{new Date(clock || Date.now()).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })} · {destination || 'Ready for your next journey'}</Text>
             <View style={styles.homeStatusCard}>
               <View style={styles.homeStatusTop}><Text style={styles.homeShield}>♡</Text><Text style={styles.homeStatusLabel}>{emergencyMode ? 'EMERGENCY SUPPORT ACTIVE' : active ? 'JOURNEY IN PROGRESS' : 'SAFETY CIRCLE READY'}</Text></View>
-              <Text style={styles.homeStatusTitle}>{emergencyMode ? 'Your contacts have been alerted' : active ? 'Your journey is being shared' : 'Your safety circle is ready'}</Text>
-              <Text style={styles.homeStatusBody}>{active && point ? `Location updated ${new Date(point.timestamp).toLocaleTimeString()}` : `${contacts.length} trusted contact${contacts.length === 1 ? '' : 's'} connected`}</Text>
+              <Text style={styles.homeStatusTitle}>{emergencyMode ? 'Emergency protocol is active' : active ? 'Your journey is being shared' : 'Your safety circle is ready'}</Text>
+              <Text style={styles.homeStatusBody} accessibilityLiveRegion="polite">{emergencyMode ? emergencyNotificationStatus : active && point ? `Location updated ${new Date(point.timestamp).toLocaleTimeString()}` : `${contacts.length} trusted contact${contacts.length === 1 ? '' : 's'} connected`}</Text>
             </View>
             {active && <LiveLocationMap point={point} trail={trail} active={active} route={routeWaypoints} stale={!!point && isLocationStale(point.timestamp, clock)} />}
             <View style={styles.homeConfidenceCard}><Text style={styles.homeConfidenceTitle}>{active ? 'Stay connected on the way.' : 'Head out with confidence.'}</Text><Text style={styles.homeConfidenceBody}>{active ? 'Your safety circle can follow your live route.' : 'Share your route and safety circle when you travel.'}</Text><TouchableOpacity style={styles.homeConfidenceButton} onPress={() => router.replace('/journey' as never)} accessibilityRole="button"><Text style={styles.homeConfidenceButtonText}>{active ? 'View live journey' : 'Plan a journey'}</Text><Text style={styles.homeConfidenceArrow}>→</Text></TouchableOpacity></View>

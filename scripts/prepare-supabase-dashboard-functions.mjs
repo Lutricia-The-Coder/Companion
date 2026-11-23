@@ -9,6 +9,7 @@ const outputRoot = path.join(root, 'tmp', 'supabase-dashboard-functions');
 const stripImports = (source) => source.replace(/^import\s+.*?;\s*\r?\n/gm, '');
 
 const emailSource = stripImports(await readFile(path.join(functionsRoot, '_shared', 'emailNotifications.ts'), 'utf8'));
+const emergencyRetryPolicySource = (await readFile(path.join(functionsRoot, '_shared', 'emergencyRetryPolicy.ts'), 'utf8')).trim();
 const expoPushSource = (await readFile(path.join(functionsRoot, '_shared', 'expoPush.mjs'), 'utf8')).trim();
 const commonSource = (await readFile(path.join(functionsRoot, '_shared', 'common.ts'), 'utf8'))
   .replace(/^import\s+.*?;\s*\r?\n/gm, '')
@@ -24,6 +25,7 @@ for (const name of ['activate-emergency', 'report-route-deviation', 'register-ev
     '// Do not add credentials to this source.',
     "import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';",
     emailSource.trim(),
+    ...(name === 'activate-emergency' ? [emergencyRetryPolicySource] : []),
     expoPushSource,
     commonSource,
     entry,

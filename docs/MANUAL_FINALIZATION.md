@@ -55,28 +55,43 @@ For each function below, open Supabase Dashboard → your `Companion` project �
 
 For each one, save a private backup of its current code, replace the editor with the entire matching file, leave **Verify JWT** enabled (the cleanup worker also retains its service-role bearer check), and click **Deploy updates**. Do not add any API keys to the function source. Existing secrets stay in Edge Function Secrets. Confirm the function shows the latest deployment time before moving to the next one. The generator prepares seven bundles with the shared validation, rate-limit, email-provider, and notification code included.
 
-## 2. Email without buying a domain
+## 2. Configure Brevo email
 
-The current Resend test sender `onboarding@resend.dev` can only send to the email address that owns the Resend account. You can test the email flow without paying for a domain by adding that same account-owner address as the test journey's trusted contact. The provider dashboard will show whether Resend accepted the message; check the owner's inbox for receipt.
+Brevo has two separate integrations in this app: Supabase Auth confirmation/recovery mail uses Brevo SMTP; emergency and route-deviation mail uses the Brevo transactional email API from Supabase Edge Functions. Configure both if both flows are needed. Brevo requires a verified sender, and domain authentication is recommended/required by major mailbox providers for reliable delivery. If you do not own a domain, try verifying your own sender address in Brevo first; delivery to other inboxes may still be rejected or filtered. [Brevo sender setup](https://help.brevo.com/hc/en-us/articles/208836149-Create-a-new-sender-From-name-and-From-email) · [Brevo domain authentication](https://help.brevo.com/hc/en-us/articles/12163873383186-Authenticate-your-domain-with-Brevo-Brevo-code-DKIM-DMARC).
 
-To send to any other trusted contact, Resend requires a verified sending domain. Skip that until you own or control a domain. Supabase Auth confirmation SMTP is separate and does not prove emergency email delivery works.
+### Emergency and route emails (Edge Functions)
 
-### Emergency email provider configuration
-
-The Edge Function uses a provider adapter. The current adapter is Resend; configure these as Supabase Edge Function secrets:
+Create a Brevo API key in **Settings → SMTP & API → API keys** and verify a sender address. In Supabase **Project Settings → Edge Functions → Secrets**, set:
 
 ```text
-COMPANION_EMAIL_PROVIDER=resend
-RESEND_API_KEY=<Resend API key>
-RESEND_FROM_EMAIL=onboarding@resend.dev
+COMPANION_EMAIL_PROVIDER=brevo
+BREVO_API_KEY=<Brevo API key>
+BREVO_FROM_EMAIL=Companion Alerts <verified-sender@your-domain.example>
 COMPANION_DASHBOARD_URL=https://companion-family.pages.dev
 ```
 
-Never put the Resend key in `.env`, app code, dashboard configuration, or function source. `onboarding@resend.dev` is limited to the Resend account owner's address in test mode. Sending to other contacts requires a sender address on a verified domain. Provider `accepted` means Resend accepted the request; it does not confirm inbox delivery. Bounce/delivered states require a Resend webhook integration and are not claimed by the app.
+Do not put the API key in the app `.env`, dashboard config, or function source. Brevo HTTP 201 with a `messageId` is recorded as **accepted**, not delivered; a bounce/delivery webhook is not currently implemented. The function retries explicit HTTP 429 responses only. Network/ambiguous outcomes are recorded as unknown without automatic retry to reduce duplicate emergency emails.
+
+After setting the secrets, regenerate all seven Dashboard bundles with `node scripts/prepare-supabase-dashboard-functions.mjs`, then replace and deploy the seven Edge Functions from `tmp/supabase-dashboard-functions/` in Supabase Dashboard. Keep Verify JWT enabled except for the cleanup worker's existing service-role guard. Do not call the provider from a local test because that would send real email.
+
+### Supabase Auth confirmation and password reset emails
+
+In Brevo, open **Settings → SMTP & API → SMTP**, copy the SMTP login, and generate an SMTP key (it is separate from the API key). In Supabase **Authentication → Emails → SMTP Settings**, configure:
+
+```text
+Sender email: <verified Brevo sender address>
+Sender name: Companion
+Host: smtp-relay.brevo.com
+Port: 587
+Username: <Brevo SMTP login shown in the SMTP tab>
+Password: <Brevo SMTP key, not the API key>
+```
+
+Save the settings and leave email confirmation enabled. Do not paste either secret into chat or the repository. Supabase custom SMTP and Edge Function secrets are separate settings; setting one does not configure the other. [Brevo SMTP setup](https://help.brevo.com/hc/en-us/articles/7924908994450-Send-transactional-emails-using-Brevo-SMTP) · [Supabase custom SMTP](https://supabase.com/docs/guides/auth/auth-smtp).
 
 Emergency activation creates one event and snapshots the initial journey location. Its email includes the activation timestamp, latest backend location when available, a map link, and the authenticated dashboard journey link. Android emergency mode continues the active location task at the configured faster cadence. Per-recipient sends use a stable idempotency key; accepted recipients are not resent. Failed and ambiguous outcomes are tracked separately, with up to six total attempts per recipient across bounded function/device retries. No-recipient, failed, unknown, partial, and provider-accepted states are distinct.
 
-Before deploying updated function bundles, apply `supabase/migrations/202611220001_notification_attempt_outcomes.sql` in Dashboard → **SQL Editor**. Then regenerate and deploy the `activate-emergency`, `report-route-deviation`, and `register-evidence` bundles as in Step 1. Build a fresh APK after the native service source change. These are production changes: do not apply the migration or deploy until approved.
+Before deploying updated function bundles, apply `supabase/migrations/202611220001_notification_attempt_outcomes.sql` in Dashboard → **SQL Editor** if it has not already been applied. Then regenerate and deploy the function bundles as in Step 1. Build a fresh APK after native service source changes. These are production changes; the user asked to perform them, but production secrets and Dashboard configuration must be entered by the project owner.
 
 ## 3. Publish the family dashboard on Cloudflare Pages
 

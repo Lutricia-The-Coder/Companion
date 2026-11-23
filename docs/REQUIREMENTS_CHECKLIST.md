@@ -4,7 +4,16 @@ This is the implementation ledger for the requirements supplied in this project 
 
 **Status key:** `[x]` implementation and the required verification are complete; `[~]` implementation exists but has a named gap or has not been verified; `[ ]` not implemented. I will only change an item to `[x]` after its completion criteria are met. Production changes, real alerts, and real emails are not part of local verification.
 
-## Current pass progress — 2026-11-19
+## Current pass progress — 2026-11-23
+
+- [~] Fixed the route-less Supabase journey creation path: omit `p_route` when empty so the deployed RPC default applies, and reduce oversized routes to its 1,000-point limit. Journey startup now stops with the returned backend error instead of showing a local-only session as protected. Included in the APK installed on the Samsung on 2026-11-23; cloud journey start still needs retesting.
+- [~] Bound the safety agent and emergency request to the newly created/persisted journey ID, avoiding stale React state when an immediate personal phrase triggers SOS. Included in the 2026-11-23 APK; end-to-end device pass remains.
+- [~] Added an Edge Function guard so concurrent duplicate SOS requests cannot send while the first request is pending; retries are allowed only after a persisted retryable provider outcome. Local bundle is generated at `tmp/supabase-dashboard-functions/activate-emergency.ts`; manually deploy it in Supabase Dashboard before testing this protection.
+- [x] Replaced the unconditional “Your contacts have been alerted” home headline with “Emergency protocol is active” plus an explicit provider outcome that distinguishes accepted, partial, pending, failed, no-recipient, and unknown states.
+- [x] Built and installed `android/app/build/outputs/apk/release/app-release.apk` (arm64-v8a, 2026-11-23) on the authorized Samsung A24. The app process launched; feature testing remains pending.
+- [~] B/C source audit: Android uses `AudioRecord` at 16 kHz mono, overlapping 0.975 s YAMNet windows every 0.48 s, on-device YAMNet score policy, native fall heuristics, timestamps, bounded error recovery, and a transcript-free opt-in prediction log. The JS deterministic engine covers independent exact phrases, confidence windows, route/fall/audio signal combinations, check-ins, de-duplication, and decision history. JVM and JS unit tests cover policy, not acoustic accuracy or physical service behavior.
+- [~] The updated APK is installed and launched. Retest that a signed-in, route-less journey creates successfully; then verify monitor status, background/foreground transitions, phrase activation while app is open, scream/shout response, check-in timing/cancel/escalation, duplicate suppression (after deploying the Edge Function bundle), location-linked emergency, and recovery after app interruption.
+- [ ] YAMNet thresholds and fall heuristics are not safety-validated. A consented labeled audio corpus and handset measurements are still required; custom phrases are only recognized through foreground OS speech recognition, not by the background YAMNet classifier.
 
 - [~] Added an opt-in Android YAMNet prediction metadata log and CSV share/delete controls; no microphone samples are stored. Evaluation labels, consented corpus metrics, and Honor X5c latency/memory/battery measurements remain outstanding.
 
@@ -21,7 +30,7 @@ This is the implementation ledger for the requirements supplied in this project 
 - [~] Safety check-ins have a visible countdown and synchronized app/native safe-confirmation. The current installed binary does not contain the new native bridge yet.
 - [~] When a saved journey is restored after the user reopens the app, Companion now restarts Android background location only if foreground and background permissions remain granted; reboot recovery still requires the user to reopen the app and be tested on the Honor.
 - [~] Added a web-only speech-monitor stub so browser startup does not import the native recognition module; browser export and the native device build remain unverified.
-- [x] `npx tsc --noEmit`, `npx expo lint`, and `git diff --check` passed after this source pass.
+- [x] `npx tsc --noEmit`, `npx expo lint`, `npm test` (25 tests), 2 duplicate-retry policy tests, 7 Resend tests, 4 Expo Push tests, Android `:expo-companion-monitor:testDebugUnitTest`, and `git diff --check` passed for this source pass. These do not replace the physical-device checks above.
 
 ## A. Registration, identity, and personalized phrases
 

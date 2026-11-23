@@ -19,11 +19,16 @@ let points = [];
 let journeyFreshnessTimer;
 let lastLocationTimestamp = null;
 let currentJourneyId = null;
+const JOURNEY_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function showMessage(text, isError = false) {
   message.textContent = text;
   message.className = isError ? 'message error' : 'message';
   message.setAttribute('role', isError ? 'alert' : 'status');
+}
+
+function afterVisibleLayout() {
+  return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 }
 
 if (!config?.url || !config?.publishableKey) {
@@ -189,10 +194,19 @@ function clearJourneyView() {
 }
 
 async function openJourney(journeyId) {
+  // Text copied from a wrapped native alert can contain line breaks/spaces inside the UUID.
+  // Remove whitespace before validation and lookup; the UUID itself has no whitespace.
+  journeyId = typeof journeyId === 'string' ? journeyId.replace(/\s+/g, '') : '';
   if (!journeyId || !supabase) {
     showMessage('Sign in and enter the journey ID shared by the owner.', true);
     return;
   }
+  if (!JOURNEY_ID_PATTERN.test(journeyId)) {
+    showMessage('This journey ID is incomplete or malformed. Copy the full 36-character ID from the owner’s “Access granted” message, then try again.', true);
+    document.querySelector('#journey-id').focus();
+    return;
+  }
+  document.querySelector('#journey-id').value = journeyId;
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) { showMessage('Sign in to view shared journeys.', true); return; }
   stopListening();
@@ -210,6 +224,8 @@ async function openJourney(journeyId) {
   document.querySelector('#journey-id').value = journeyId;
   document.querySelector('#journey-title').textContent = 'Connecting to live journey…';
   document.querySelector('#event-list').replaceChildren(Object.assign(document.createElement('li'), { className: 'event-empty', textContent: 'Loading journey events…' }));
+  await afterVisibleLayout();
+  map.invalidateSize({ pan: false });
   showMessage('Opening journey…');
   journeyFreshnessTimer = setInterval(renderLocationFreshness, 10_000);
   await refreshJourney(journeyId);
@@ -377,3 +393,6 @@ function renderEmergencyEvents(events, journeyId) {
 
 window.addEventListener('offline', () => showMessage('Offline · live journey updates may be delayed.', true));
 window.addEventListener('online', () => showMessage('Connection restored · waiting for the next live update.'));
+window.addEventListener('resize', () => {
+  if (map && !journeyCard.hidden) map.invalidateSize({ pan: false });
+});
