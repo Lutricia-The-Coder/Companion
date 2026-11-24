@@ -1,5 +1,4 @@
 import 'react-native-url-polyfill/auto';
-import 'expo-sqlite/localStorage/install';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
@@ -8,8 +7,7 @@ import { deleteEncryptedItem, getEncryptedItem, setEncryptedItem } from '../serv
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
 const supabasePublishableKey = process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? '';
 // The native session contains bearer credentials: keep it encrypted by Android
-// Keystore/iOS Keychain. Web uses same-origin browser storage. During migration,
-// an existing SQLite localStorage session is moved into SecureStore on first read.
+// Keystore/iOS Keychain. Web uses the browser's built-in same-origin localStorage.
 const browserStorage = typeof localStorage === 'undefined' ? undefined : localStorage;
 const authStorage = Platform.OS === 'web' ? browserStorage : {
   async getItem(key: string) {
