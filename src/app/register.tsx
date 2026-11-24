@@ -71,7 +71,7 @@ export default function RegisterScreen() {
       return;
     }
     const trustedContact = { name: contactName.trim(), phone: contactPhone.trim(), email: contactEmail.trim().toLowerCase() };
-    try {
+    const saveLocalSafetySetup = async () => {
       await saveTriggerPhrases(phrases.map((item) => ({ ...item, phrase: item.phrase.trim() })).filter((item) => item.phrase.length >= 2));
       await setPrivateItem('companion-contacts', JSON.stringify([trustedContact]));
       await AsyncStorage.multiSet([
@@ -82,12 +82,9 @@ export default function RegisterScreen() {
         ['companion-share-journey-default', String(shareEachJourney)],
         ['companion-notification-preferences-pending', JSON.stringify({ email: emailAlerts, route_deviation: routeAlerts })],
       ]);
-    } catch (error) {
-      Alert.alert('Could not save safety setup', error instanceof Error ? error.message : 'Secure phrase storage is unavailable.');
-      return;
-    }
+    };
     if (!supabaseReady || !supabase) {
-      Alert.alert('Supabase setup needed', 'Your phrase and contact are saved locally. Add your Supabase project URL and publishable key to .env to create a synced account.');
+      Alert.alert('Supabase setup needed', 'Add your Supabase project URL and publishable key to .env before creating an account.');
       return;
     }
     setBusy(true);
@@ -102,6 +99,7 @@ export default function RegisterScreen() {
         await saveTrustedContacts(user.id, [trustedContact]);
         await saveNotificationPreferences(user.id, { email: emailAlerts, route_deviation: routeAlerts, push: false });
         await AsyncStorage.removeItem('companion-notification-preferences-pending');
+        await saveLocalSafetySetup();
         router.replace('/');
         return;
       }
@@ -116,6 +114,18 @@ export default function RegisterScreen() {
         },
       });
       if (error) throw error;
+      if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+        Alert.alert(
+          'Try signing in',
+          'This email may already have a Companion account. If you have signed up before, sign in or reset your password. If this is a new address, check your inbox for a confirmation email.',
+          [
+            { text: 'Reset password', onPress: () => router.replace('/forgot-password') },
+            { text: 'Go to sign in', onPress: () => router.replace('/login') },
+          ],
+        );
+        return;
+      }
+      await saveLocalSafetySetup();
       if (data.user && data.session) {
         await saveTrustedContacts(data.user.id, [trustedContact]);
         await saveNotificationPreferences(data.user.id, { email: emailAlerts, route_deviation: routeAlerts, push: false });

@@ -85,6 +85,7 @@ $arguments = @(
   '-p', (Join-Path $PSScriptRoot '..\android'),
   $gradleTask,
   '--max-workers=2',
+  '-Pkotlin.compiler.execution.strategy=in-process',
   "-PreactNativeArchitectures=$architectures"
 )
 if ($BuildVariant -eq 'release') {

@@ -21,6 +21,7 @@ export type MonitorStatus = {
   audioCaptureEnabled?: boolean;
   motionMonitoring?: boolean;
   audioEvaluationLogging?: boolean;
+  audioEvaluationLogError?: string | null;
   audioEvaluationRowsWritten?: number;
   audioEvaluationLogBytes?: number;
   audioEvaluationLimitReached?: boolean;

@@ -15,6 +15,8 @@ import android.hardware.SensorManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -69,6 +71,8 @@ class CompanionMonitorService : Service(), SensorEventListener {
   @Volatile private var triggerPhrasesJson = "[]"
   @Volatile private var motionMonitoring = true
   @Volatile private var emergencySent = false
+  @Volatile private var emergencyDeliveryInFlight = false
+  @Volatile private var emergencyNetworkCallback: ConnectivityManager.NetworkCallback? = null
   private var journeyId = ""
 
   override fun onCreate() {
@@ -82,7 +86,6 @@ class CompanionMonitorService : Service(), SensorEventListener {
     when (intent?.action) {
       ACTION_STOP -> {
         clearPendingCheckIn()
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("audioEvaluationLogging", false).apply()
         stopMonitoring()
         stopSelf()
         return START_NOT_STICKY
@@ -142,7 +145,28 @@ class CompanionMonitorService : Service(), SensorEventListener {
       ACTION_START -> {
         val nextJourneyId = intent.getStringExtra(EXTRA_JOURNEY_ID).orEmpty()
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
-        if (prefs.getString("journeyId", null) != nextJourneyId) clearPendingCheckIn()
+        val previousJourneyId = prefs.getString("journeyId", null)
+        val pendingEmergencyJourneyId = prefs.getString("pendingEmergencyJourneyId", "").orEmpty()
+        val emergencyBelongsToNextJourney = prefs.getBoolean("emergencyActive", false) &&
+          (if (pendingEmergencyJourneyId.isNotBlank()) pendingEmergencyJourneyId == nextJourneyId else previousJourneyId == nextJourneyId)
+        if (!emergencyBelongsToNextJourney && (previousJourneyId != nextJourneyId || prefs.getBoolean("emergencyActive", false) || prefs.getBoolean("emergencyPending", false))) {
+          clearPendingCheckIn()
+          handler.removeCallbacksAndMessages(null)
+          unregisterEmergencyNetworkRetry()
+          // A new journey must not inherit an unresolved local retry from an older journey.
+          // The older server-side emergency remains in history and is not modified here.
+          prefs.edit()
+            .putBoolean("emergencyActive", false)
+            .putBoolean("emergencyPending", false)
+            .putInt("emergencyRetryAttempts", 0)
+            .remove("pendingEmergencyReason")
+            .remove("pendingEmergencyJourneyId")
+            .remove("emergencyRetryAttempts")
+            .apply()
+          emergencySent = false
+          emergencyRetryAttempts = 0
+          pendingEmergencyReason = ""
+        }
         journeyId = nextJourneyId
         val editor = prefs.edit().putString("journeyId", journeyId)
           .putString("supabaseUrl", intent.getStringExtra(EXTRA_SUPABASE_URL).orEmpty())
@@ -171,6 +195,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
           if (prefs.getBoolean("emergencyPending", false) && !reason.isNullOrBlank() && !pendingJourneyId.isNullOrBlank()) {
             emergencyRetryAttempts = prefs.getInt("emergencyRetryAttempts", 0)
             pendingEmergencyReason = reason
+            registerEmergencyNetworkRetry()
             attemptEmergencyDelivery(reason, pendingJourneyId)
           }
           return START_STICKY
@@ -196,6 +221,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
           if (prefs.getBoolean("emergencyPending", false) && !reason.isNullOrBlank() && journeyId.isNotBlank()) {
             emergencyRetryAttempts = prefs.getInt("emergencyRetryAttempts", 0)
             pendingEmergencyReason = reason
+            registerEmergencyNetworkRetry()
             attemptEmergencyDelivery(reason, journeyId)
           }
           return START_STICKY
@@ -481,7 +507,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
       preferences.edit().putInt("audioEvaluationRowsWritten", rowCount + 1).apply()
     } catch (error: Exception) {
       publishStatus("Audio evaluation log could not be written: ${error.message ?: "storage unavailable"}")
-      preferences.edit().putBoolean("audioEvaluationLogging", false).apply()
+      preferences.edit().putString("audioEvaluationLogError", error.message ?: "storage unavailable").apply()
     }
   }
 
@@ -509,6 +535,14 @@ class CompanionMonitorService : Service(), SensorEventListener {
 
   private fun onDistress(kind: String, confidence: Float, timestamp: Long) {
     if (emergencySent) return
+    if (kind == "scream" || kind == "shouting") {
+      // This callback follows two consecutive high-confidence YAMNet windows.
+      // That deterministic classifier decision is sufficient for automatic SOS.
+      pendingSignalAt = 0L
+      pendingSignalConfidence = 0f
+      activateEmergency("Repeated high-confidence $kind detected by on-device sound classification.")
+      return
+    }
     if (kind == "distress_vocalization") {
       // A cry/whimper/wail alone prompts a check-in; only another distinct signal can escalate.
       pendingSignalAt = timestamp
@@ -587,6 +621,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
     pendingEmergencyReason = ""
     clearPendingCheckIn()
     handler.removeCallbacksAndMessages(null)
+    unregisterEmergencyNetworkRetry()
     prefs.edit()
       .putBoolean("emergencyActive", false)
       .putBoolean("emergencyPending", false)
@@ -607,6 +642,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
   private fun activateEmergency(reason: String) {
     if (emergencySent) return
     emergencySent = true
+    registerEmergencyNetworkRetry()
     monitoring = false
     stopAudioCapture()
     pendingEmergencyReason = reason
@@ -627,9 +663,14 @@ class CompanionMonitorService : Service(), SensorEventListener {
   }
 
   private fun attemptEmergencyDelivery(reason: String, destinationJourneyId: String) {
+    synchronized(this) {
+      if (emergencyDeliveryInFlight) return
+      emergencyDeliveryInFlight = true
+    }
     io.execute {
       val accepted = notifyBackend(reason, destinationJourneyId)
       handler.post {
+        synchronized(this) { emergencyDeliveryInFlight = false }
         if (accepted) {
           emergencyRetryAttempts = 0
           pendingEmergencyReason = ""
@@ -639,6 +680,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
             .remove("pendingEmergencyJourneyId")
             .remove("emergencyRetryAttempts")
             .apply()
+          unregisterEmergencyNetworkRetry()
         } else {
           scheduleEmergencyRetry(reason, destinationJourneyId)
         }
@@ -648,13 +690,44 @@ class CompanionMonitorService : Service(), SensorEventListener {
 
   private fun scheduleEmergencyRetry(reason: String, destinationJourneyId: String) {
     if (emergencyRetryAttempts >= emergencyRetryDelays.size) {
-      publishStatus("Emergency alert is still pending. Companion will retry when the monitor service restarts.")
+      publishStatus("Emergency alert delivery is unconfirmed. Companion is waiting for network access to retry; if monitoring stops, it will retry when monitoring restarts.")
       return
     }
     val delay = emergencyRetryDelays[emergencyRetryAttempts]
     emergencyRetryAttempts += 1
     getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt("emergencyRetryAttempts", emergencyRetryAttempts).apply()
     handler.postDelayed({ attemptEmergencyDelivery(reason, destinationJourneyId) }, delay)
+  }
+
+  private fun registerEmergencyNetworkRetry() {
+    if (emergencyNetworkCallback != null) return
+    val manager = getSystemService(ConnectivityManager::class.java) ?: return
+    val callback = object : ConnectivityManager.NetworkCallback() {
+      override fun onAvailable(network: Network) {
+        handler.post {
+          val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+          if (!prefs.getBoolean("emergencyActive", false) || !prefs.getBoolean("emergencyPending", false)) return@post
+          val reason = prefs.getString("pendingEmergencyReason", null).orEmpty()
+          val pendingJourney = prefs.getString("pendingEmergencyJourneyId", null).orEmpty()
+          if (reason.isBlank() || pendingJourney.isBlank()) return@post
+          emergencyRetryAttempts = 0
+          prefs.edit().putInt("emergencyRetryAttempts", 0).apply()
+          attemptEmergencyDelivery(reason, pendingJourney)
+        }
+      }
+    }
+    try {
+      manager.registerDefaultNetworkCallback(callback)
+      emergencyNetworkCallback = callback
+    } catch (_: Exception) {
+      publishStatus("Emergency retry will resume when monitoring restarts; network monitoring could not be registered.")
+    }
+  }
+
+  private fun unregisterEmergencyNetworkRetry() {
+    val callback = emergencyNetworkCallback ?: return
+    emergencyNetworkCallback = null
+    try { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(callback) } catch (_: Exception) { }
   }
 
   private fun notifyBackend(reason: String, destinationJourneyId: String): Boolean {
@@ -694,7 +767,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
         "no_recipients" -> publishStatus("Emergency is recorded, but no eligible email contacts are configured.")
         "failed" -> publishStatus("Emergency is recorded, but email delivery failed${if (retryable) "; retrying" else " after the retry limit"}.")
         "unknown" -> publishStatus("Emergency is recorded, but the email provider outcome is unknown${if (retryable) "; retrying safely" else " and retries are exhausted"}.")
-        "already_active" -> publishStatus("Emergency is active, but this server version did not return contact delivery outcomes; retrying the request.")
+        "already_active" -> publishStatus("Emergency is active; checking the saved contact delivery outcome.")
         else -> publishStatus("Emergency is recorded, but contact delivery has no confirmed provider outcome.")
       }
       connection.disconnect()
@@ -732,6 +805,7 @@ class CompanionMonitorService : Service(), SensorEventListener {
     monitoring = false
     stopAudioCapture()
     handler.removeCallbacksAndMessages(null)
+    unregisterEmergencyNetworkRetry()
     try { audioRecord?.stop() } catch (_: Exception) { }
     sensorManager?.unregisterListener(this)
     getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("running", false).apply()

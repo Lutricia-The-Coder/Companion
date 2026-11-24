@@ -15,6 +15,7 @@ export default function TriggerPhraseManager({ onPrimaryPhraseChange }: { onPrim
   const [phrases, setPhrases] = useState<TriggerPhrase[]>([]);
   const [draft, setDraft] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [phraseFormOpen, setPhraseFormOpen] = useState(false);
   const [storage, setStorage] = useState<TriggerPhraseStorage | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -51,6 +52,7 @@ export default function TriggerPhraseManager({ onPrimaryPhraseChange }: { onPrim
     void persist(next);
     setDraft('');
     setEditingId(null);
+    setPhraseFormOpen(false);
   };
 
   const updatePhrase = (id: string, patch: Partial<TriggerPhrase>) => {
@@ -70,7 +72,7 @@ export default function TriggerPhraseManager({ onPrimaryPhraseChange }: { onPrim
       <Text style={s.help}>Use short phrases that are unlikely to come up in ordinary conversation. Up to 8 phrases.</Text>
       {loading ? <Text style={s.help}>Loading secure settings…</Text> : phrases.length === 0 ? <Text style={s.empty}>No phrases saved yet.</Text> : phrases.map((item) => <View key={item.id} style={s.phraseRow}>
         <View style={{ flex: 1 }}>
-          <TouchableOpacity onPress={() => { setEditingId(item.id); setDraft(item.phrase); }} accessibilityRole="button" accessibilityLabel={`Edit phrase ${item.phrase}`}>
+          <TouchableOpacity onPress={() => { setEditingId(item.id); setDraft(item.phrase); setPhraseFormOpen(true); }} accessibilityRole="button" accessibilityLabel={`Edit phrase ${item.phrase}`}>
             <Text style={s.phrase}>“{item.phrase}” · Edit</Text>
           </TouchableOpacity>
           <TouchableOpacity onPress={() => updatePhrase(item.id, { independentActivation: !item.independentActivation })} accessibilityRole="switch" accessibilityState={{ checked: item.independentActivation }}>
@@ -82,8 +84,11 @@ export default function TriggerPhraseManager({ onPrimaryPhraseChange }: { onPrim
         </View>
         <TouchableOpacity onPress={() => removePhrase(item.id)} accessibilityRole="button" accessibilityLabel={`Delete phrase ${item.phrase}`} style={s.remove}><Text style={s.removeText}>×</Text></TouchableOpacity>
       </View>)}
-      <TextInput value={draft} onChangeText={setDraft} placeholder="Add a private SOS phrase" placeholderTextColor={C.muted} style={s.input} maxLength={80} accessibilityLabel="New personal SOS phrase" />
-      <TouchableOpacity onPress={addPhrase} disabled={!draft.trim() || (!editingId && phrases.length >= 8) || loading} style={[s.addButton, (!draft.trim() || (!editingId && phrases.length >= 8)) && { opacity: 0.5 }]}><Text style={s.addText}>{editingId ? 'Save phrase changes' : 'Add phrase'}</Text></TouchableOpacity>
+      {!phraseFormOpen ? <TouchableOpacity onPress={() => { setEditingId(null); setDraft(''); setPhraseFormOpen(true); }} disabled={phrases.length >= 8 || loading} style={[s.addButton, (phrases.length >= 8 || loading) && { opacity: 0.5 }]} accessibilityRole="button"><Text style={s.addText}>{phrases.length >= 8 ? 'Phrase limit reached' : 'Add phrase'}</Text></TouchableOpacity> : <>
+        <TextInput value={draft} onChangeText={setDraft} placeholder="Add a private SOS phrase" placeholderTextColor={C.muted} style={s.input} maxLength={80} accessibilityLabel={editingId ? 'Edit personal SOS phrase' : 'New personal SOS phrase'} autoFocus />
+        <TouchableOpacity onPress={addPhrase} disabled={!draft.trim() || (!editingId && phrases.length >= 8) || loading} style={[s.addButton, (!draft.trim() || (!editingId && phrases.length >= 8)) && { opacity: 0.5 }]}><Text style={s.addText}>{editingId ? 'Save phrase changes' : 'Save phrase'}</Text></TouchableOpacity>
+        <TouchableOpacity onPress={() => { setPhraseFormOpen(false); setEditingId(null); setDraft(''); }} style={s.cancelButton} accessibilityRole="button"><Text style={s.cancelText}>Cancel</Text></TouchableOpacity>
+      </>}
       <Text style={[s.storage, { color: storage === 'encrypted-device' ? C.teal : C.amber }]}>{storage === 'encrypted-device' ? 'Stored with Android Keystore encryption on this device.' : 'Web preview: stored locally in browser storage, not encrypted.'}</Text>
     </View>
     <View style={s.warning}>
@@ -104,6 +109,7 @@ const s = StyleSheet.create({
   remove: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }, removeText: { color: C.red, fontSize: 25 },
   input: { color: C.ink, fontSize: 13, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.line, marginTop: 8 },
   addButton: { minHeight: 44, marginTop: 10, borderRadius: 10, backgroundColor: C.teal, alignItems: 'center', justifyContent: 'center' }, addText: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
+  cancelButton: { minHeight: 40, marginTop: 4, alignItems: 'center', justifyContent: 'center' }, cancelText: { color: C.muted, fontSize: 12, fontWeight: '700' },
   storage: { fontSize: 10, lineHeight: 15, marginTop: 12 },
   warning: { backgroundColor: theme.amberSoft, borderWidth: 1, borderColor: '#F0D5A4', borderRadius: 14, padding: 14, marginTop: 13 }, warningTitle: { color: C.amber, fontSize: 12, fontWeight: '800' }, warningBody: { color: '#755D3E', fontSize: 11, lineHeight: 17, marginTop: 5 },
 });

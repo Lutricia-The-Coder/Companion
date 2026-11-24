@@ -125,17 +125,19 @@ async function pushContactOutcomes(admin: SupabaseClient, journeyId: string, own
       .filter((email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)),
   )];
   if (!emails.length) return [];
-  const { data: profiles } = await admin.from('profiles').select('id,email,notification_preferences').in('email', emails).neq('id', ownerId);
+  const { data: profiles, error: profileLookupError } = await admin.from('profiles').select('id,email,notification_preferences').in('email', emails).neq('id', ownerId);
+  if (profileLookupError) return [{ channel: 'push', target: 'authorized contact devices', accepted: false, status: 'unknown', attempts: 0, retryable: true, error: 'Could not check recipient push preferences.', provider: 'expo' }];
   const eligible = (profiles ?? []).filter((contact) => {
     const prefs = contact.notification_preferences && typeof contact.notification_preferences === 'object' ? contact.notification_preferences as Record<string, unknown> : {};
     return prefs.push === true;
   });
   if (!eligible.length) return [];
   const contactIds = eligible.map((contact) => contact.id);
-  const [{ data: access }, { data: devices }] = await Promise.all([
+  const [{ data: access, error: accessError }, { data: devices, error: deviceError }] = await Promise.all([
     admin.from('journey_access').select('user_id').eq('journey_id', journeyId).in('user_id', contactIds),
     admin.from('push_devices').select('owner_id,expo_push_token').in('owner_id', contactIds),
   ]);
+  if (accessError || deviceError) return [{ channel: 'push', target: 'authorized contact devices', accepted: false, status: 'unknown', attempts: 0, retryable: true, error: 'Could not verify journey access or registered push devices.', provider: 'expo' }];
   const granted = new Set((access ?? []).map((row) => row.user_id));
   const validTokens = new Set(eligible.filter((contact) => granted.has(contact.id)).map((contact) => contact.id));
   const targets = (devices ?? []).filter((device) => validTokens.has(device.owner_id));
@@ -217,7 +219,8 @@ export async function notifyContacts(admin: SupabaseClient, journeyId: string, e
       provider: Deno.env.get('COMPANION_EMAIL_PROVIDER') ?? 'brevo',
     };
   }));
-  const pushOutcomes = await pushContactOutcomes(admin, journeyId, journey.owner_id, profile?.trusted_contacts, routeNotificationsEnabled && preferences.push !== false, eventId, category, title, `${profile?.display_name || 'A trusted Companion contact'} needs safety assistance. ${reason}. Time: ${eventTime}. Open the Companion dashboard for the authorized live journey.`, { journeyId, eventId, liveLink, mapLink }, attemptsByKey);
+  // Each recipient controls their own push preference; the owner's setting must not gate it.
+  const pushOutcomes = await pushContactOutcomes(admin, journeyId, journey.owner_id, profile?.trusted_contacts, routeNotificationsEnabled, eventId, category, title, `${profile?.display_name || 'A trusted Companion contact'} needs safety assistance. ${reason}. Time: ${eventTime}. Open the Companion dashboard for the authorized live journey.`, { journeyId, eventId, liveLink, mapLink }, attemptsByKey);
   const outcomes = [...emailOutcomes, ...pushOutcomes];
   const accepted = outcomes.filter((item) => item.accepted).length;
   const unknown = outcomes.filter((item) => item.status === 'unknown').length;
@@ -229,12 +232,13 @@ export async function notifyContacts(admin: SupabaseClient, journeyId: string, e
     : accepted === allOutcomes.length ? 'accepted'
     : accepted > 0 ? 'partial'
     : unknown > 0 ? 'unknown' : 'failed';
-  const result = { status, accepted, failures, unknown, retryable: retryable || !attemptsRecorded, attemptsRecorded, outcomes: allOutcomes };
+  // Audit persistence failure must not resend a message already accepted by its provider.
+  const result = { status, accepted, failures, unknown, retryable, attemptsRecorded, outcomes: allOutcomes };
   const { error: updateError } = await admin.from('safety_events').update({ status: 'recorded', notifications: {
     ...existingNotifications, ...result,
   } }).eq('id', eventId);
   if (updateError) console.error('Could not save emergency notification summary');
-  return { ...result, retryable: result.retryable || Boolean(updateError) };
+  return { ...result, retryable: result.retryable, auditWarning: !attemptsRecorded || Boolean(updateError) };
 }
 
 /** Sends an expiring, bearer-protected evidence link only to the journey owner's saved trusted contacts. */

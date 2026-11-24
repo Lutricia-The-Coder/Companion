@@ -81,7 +81,7 @@ export default function DevicePermissions() {
 
   return <View style={styles.card}>
     <Text style={styles.heading}>PERMISSIONS</Text>
-    <Text style={styles.description}>Review the access Companion needs for safety features. You can change these any time in your phone settings.</Text>
+    <Text style={styles.description}>Location, audio, camera, and notification access for safety features.</Text>
     <PermissionRow label="Location while using the app" state={permissions.location} />
     <PermissionRow label="Background location" state={permissions.backgroundLocation} />
     <PermissionRow label="Microphone" state={permissions.microphone} />

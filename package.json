@@ -54,6 +54,7 @@
     "lint": "expo lint",
     "test": "node --experimental-strip-types --test tests/safetyDecisionEngine.test.mjs",
     "test:audio-evaluation": "node --test tests/audioEvaluation.test.mjs",
+    "evaluate:audio": "node scripts/evaluate-audio-metrics.mjs",
     "test:supabase-email": "node --experimental-strip-types --test tests/supabaseEmailNotifications.test.mjs",
     "test:expo-push": "node --test functions/expoPush.test.js",
     "test:functions": "node --test functions/emergencyActivation.test.js functions/notificationRetry.test.js",

@@ -82,7 +82,9 @@ class CompanionMonitorModule : Module() {
       val context = appContext.reactContext?.applicationContext
         ?: throw IllegalStateException("Application context is unavailable.")
       context.getSharedPreferences(CompanionMonitorService.PREFS, Context.MODE_PRIVATE)
-        .edit().putBoolean("audioEvaluationLogging", enabled).apply()
+        .edit().putBoolean("audioEvaluationLogging", enabled)
+        .also { if (enabled) it.remove("audioEvaluationLogError") }
+        .apply()
     }
 
     AsyncFunction("getAudioEvaluationCsv") {
@@ -96,7 +98,7 @@ class CompanionMonitorModule : Module() {
       val context = appContext.reactContext?.applicationContext
         ?: throw IllegalStateException("Application context is unavailable.")
       context.getSharedPreferences(CompanionMonitorService.PREFS, Context.MODE_PRIVATE)
-        .edit().putInt("audioEvaluationRowsWritten", 0).apply()
+        .edit().putInt("audioEvaluationRowsWritten", 0).remove("audioEvaluationLogError").apply()
       File(context.filesDir, CompanionMonitorService.AUDIO_EVALUATION_FILENAME).delete()
     }
 
@@ -153,6 +155,7 @@ class CompanionMonitorModule : Module() {
         "phraseModelReady" to OfflinePhraseModel.isInstalled(context),
         "motionMonitoring" to prefs.getBoolean("motionMonitoringEnabled", true),
         "audioEvaluationLogging" to prefs.getBoolean("audioEvaluationLogging", false),
+        "audioEvaluationLogError" to prefs.getString("audioEvaluationLogError", null),
         "audioEvaluationRowsWritten" to evaluationRows,
         "audioEvaluationLogBytes" to evaluationFile.length().toDouble(),
         "audioEvaluationLimitReached" to (evaluationRows >= CompanionMonitorService.MAX_AUDIO_EVALUATION_ROWS
